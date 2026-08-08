@@ -319,7 +319,83 @@ try:
     ok(open(os.path.join(d_saves, "world2", "level.dat")).read() == "world2",
        "无重名 world2 正常复制")
 
-    print("== 11. 版本挑选：无适配目标版本绝不下载 ==")
+    print("== 11. 作者先验，作者不对再走同版本号校验 ==")
+    import mc_migrator.modrinth as _mr
+    _saved = (_mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.project_members)
+
+    vmatch_jar = os.path.join(tmp, "vmatch.jar")
+    make_jar(vmatch_jar, {"fabric.mod.json": json.dumps(
+        {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["Alice"]})})
+    vmatch_sha1 = mm.sha1_of(vmatch_jar)
+    fork_jar = os.path.join(tmp, "vfork.jar")
+    make_jar(fork_jar, {"fabric.mod.json": json.dumps(
+        {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["EvilForker"]})})
+
+    def fake_sha1(_s):
+        return None
+
+    def fake_search(q, mc=None, loader=None, limit=10):
+        return [{"project_id": "P1", "slug": "somemod", "title": "SomeMod", "id": "P1"}]
+
+    def fake_versions(pid, mc=None, loader=None):
+        if mc and loader:
+            return []
+        return [
+            {"id": "v9", "version_number": "1.5.0", "date_published": "2026-02-01",
+             "game_versions": ["1.20.1"], "loaders": ["fabric"],
+             "files": [{"primary": True, "filename": "m-1.5.0.jar", "hashes": {"sha1": "X" * 40}}]},
+            {"id": "v8", "version_number": "v1.4.0+build.7", "date_published": "2026-01-01",
+             "game_versions": ["1.20.1"], "loaders": ["fabric"],
+             "files": [{"primary": True, "filename": "m-1.4.0.jar", "hashes": {"sha1": vmatch_sha1}}]},
+        ]
+
+    members_now = ["Alice"]
+
+    def fake_members(pid):
+        return list(members_now)
+
+    _mr.mr_lookup_sha1 = fake_sha1
+    _mr.mr_search = fake_search
+    _mr.mr_versions = fake_versions
+    _mr.project_members = fake_members
+    _mr._versions_cache.clear()
+    try:
+        pid, conf, why = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "version": "9.9.9", "authors": ["Alice"]},
+            "1.20.1", "fabric", vmatch_jar)
+        ok(pid == "P1" and "作者校验通过" in why,
+           "作者一致 → 直接通过（无需同版本号）: %s" % why)
+        members_now = ["Alice", "Bob"]
+        _mr._versions_cache.clear()
+        pid, conf, why = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["Alice"]},
+            "1.20.1", "fabric", vmatch_jar)
+        ok(pid == "P1" and conf == 1.0 and "原版文件" in why,
+           "作者不一致但同版本号且文件 sha1 一致 → 通过: %s" % why)
+        pid, conf, why = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["EvilForker"]},
+            "1.20.1", "fabric", fork_jar)
+        ok(pid is None and "疑似 fork" in why,
+           "作者不一致且文件 sha1 不一致 → 拒绝: %s" % why)
+        pid, conf, why = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "version": "9.9.9", "authors": ["EvilForker"]},
+            "1.20.1", "fabric", vmatch_jar)
+        ok(pid is None and "疑似 fork" in why, "作者不一致且无同版本号 → 拒绝")
+        nover_jar = os.path.join(tmp, "vnover.jar")
+        make_jar(nover_jar, {"fabric.mod.json": json.dumps(
+            {"id": "somemod", "name": "SomeMod", "authors": ["EvilForker"]})})
+        pid, conf, why = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "authors": ["EvilForker"]},
+            "1.20.1", "fabric", nover_jar)
+        ok(pid is None and "疑似 fork" in why, "作者不一致且无版本号 → 拒绝（不漏过）")
+        pid, conf, why = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "version": "9.9.9", "authors": []},
+            "1.20.1", "fabric", vmatch_jar)
+        ok(pid == "P1" and "slug" in why, "无作者信息 → 按置信度通过: %s" % why)
+    finally:
+        _mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.project_members = _saved
+
+    print("== 12. 版本挑选：无适配目标版本绝不下载 ==")
     import mc_migrator.modrinth as _mr
     _orig_versions = _mr.mr_versions
 

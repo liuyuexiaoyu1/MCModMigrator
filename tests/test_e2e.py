@@ -69,6 +69,8 @@ def main():
                      {"id": "gca_wrapper", "name": "gugle-carpet-addition-Wrapper", "version": "1.0.6"},
                      {"id": "gca", "name": "gugle-carpet-addition", "version": "2.12.6"}),
                     ("my_private_mod.jar", {"id": "my_private_mod", "name": "My Private Mod", "version": "0.0.1"}),
+                    # 与 sodium-extra 的依赖 sodium 同项目：应归入“重复项目合并”，不进“跳过”
+                    ("sodium_fake.jar", {"id": "sodium", "name": "Sodium", "version": "0.0.1"}),
                 ],
                 extra_dirs=["config", "journeymap"],
                 extra_files=["options.txt"])
@@ -147,6 +149,9 @@ def main():
         print("  · 跳过最新版本断言: %s" % e)
 
     check("my_private_mod" in out and "手动处理" in out, "私有模组进入手动清单")
+    check("重复项目合并 1 个" in out and "sodium_fake.jar" in out,
+          "重复项目独立统计，不进『跳过』清单")
+    check("合并重复" in out, "重复项日志标记为『合并重复』而非跳过")
     check(os.path.exists(os.path.join(dst_v, "config", "data.txt")), "config 已迁移")
     check(os.path.exists(os.path.join(dst_v, "options.txt")), "options.txt 已迁移")
     check(os.path.exists(os.path.join(dst_v, "saves", "world1", "level.dat")), "saves 新世界已复制")

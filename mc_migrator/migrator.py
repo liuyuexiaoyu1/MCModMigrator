@@ -66,8 +66,8 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
             cfg.log.warn("%s，已记入手动清单" % (reason or "未找到匹配"))
             continue
         if project_id in downloaded_projects:
-            report["skipped"].append(jname)
-            cfg.log.info("该项目此前已下载，跳过重复（%s）" % project_id)
+            report["duplicates"].append(jname)
+            cfg.log.info("该项目此前已下载，合并重复（%s）" % project_id)
             continue
         if confidence < ASK_CONF:
             report["manual"].append((jname, meta, "置信度不足 (%.2f)" % confidence))
@@ -332,7 +332,7 @@ def run_migration(params, cfg):
 
     cfg.log.info("\n=== 模组迁移（源 mods 目录: %s）===" % src_mods)
 
-    report = {"ok": [], "manual": [], "deps": [], "skipped": []}
+    report = {"ok": [], "manual": [], "deps": [], "skipped": [], "duplicates": []}
     migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event)
 
     if not same_client:
@@ -368,9 +368,11 @@ def print_summary(report, same_client):
     for name, fname in report["ok"]:
         print("  %s -> %s" % (name, fname))
     if report["skipped"]:
-        print("跳过 %d 个（库文件/非模组/重复）：" % len(report["skipped"]))
+        print("跳过 %d 个（库文件/非模组）：" % len(report["skipped"]))
         for j in report["skipped"]:
             print("  %s" % j)
+    if report.get("duplicates"):
+        print("重复项目合并 %d 个（同一项目只下载一次）：" % len(report["duplicates"]))
     if report["deps"]:
         print("依赖：")
         for d in report["deps"]:
@@ -394,8 +396,12 @@ def write_report_file(report, src_desc, dst_desc):
         lines.append("  ✓ %s -> %s" % (name, fname))
     if report["skipped"]:
         lines.append("")
-        lines.append("跳过 %d 个:" % len(report["skipped"]))
+        lines.append("跳过 %d 个（库文件/非模组）:" % len(report["skipped"]))
         lines += ["  · " + j for j in report["skipped"]]
+    if report.get("duplicates"):
+        lines.append("")
+        lines.append("重复项目合并 %d 个（同一项目只下载一次）:" % len(report["duplicates"]))
+        lines += ["  · " + j for j in report["duplicates"]]
     if report["manual"]:
         lines.append("")
         lines.append("⚠ 需要手动处理 %d 个:" % len(report["manual"]))

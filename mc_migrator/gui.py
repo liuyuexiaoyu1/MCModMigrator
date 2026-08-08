@@ -101,9 +101,9 @@ class MainWindow(QtWidgets.QWidget):
 
         mode_box = QtWidgets.QGroupBox("迁移模式")
         mode = QtWidgets.QHBoxLayout(mode_box)
-        self.c2c_radio = QtWidgets.QRadioButton("客户端 → 客户端 (C2C)")
+        self.c2c_radio = QtWidgets.QRadioButton("客户端")
         self.c2c_radio.setChecked(True)
-        self.s2s_radio = QtWidgets.QRadioButton("服务端 → 服务端 (S2S)")
+        self.s2s_radio = QtWidgets.QRadioButton("服务端")
         self.c2c_radio.toggled.connect(self._on_mode_changed)
         self.s2s_radio.toggled.connect(self._on_mode_changed)
         mode.addWidget(self.c2c_radio)
@@ -114,7 +114,7 @@ class MainWindow(QtWidgets.QWidget):
         src_box = QtWidgets.QGroupBox("① 源")
         src_grid = QtWidgets.QGridLayout(src_box)
         self.src_root_edit = QtWidgets.QLineEdit()
-        self.src_root_edit.setPlaceholderText(".minecraft 根目录 / versions 下版本隔离目录 / 服务端根目录（S2S）")
+        self.src_root_edit.setPlaceholderText(".minecraft 根目录 / versions 下版本隔离目录 / 服务端根目录")
         self.src_browse_btn = QtWidgets.QPushButton("浏览...")
         self.src_browse_btn.clicked.connect(self._pick_src_root)
         self.src_version_combo = QtWidgets.QComboBox()
@@ -185,10 +185,10 @@ class MainWindow(QtWidgets.QWidget):
         dst_grid.setColumnStretch(1, 1)
         root.addWidget(dst_box)
 
-        opt_box = QtWidgets.QGroupBox("③ 选项（数据迁移类别可单独勾选）")
+        opt_box = QtWidgets.QGroupBox("③ 选项")
         opt = QtWidgets.QGridLayout(opt_box)
-        self.auto_yes_chk = QtWidgets.QCheckBox("自动确认模组匹配（不弹窗）")
-        self.deps_chk = QtWidgets.QCheckBox("自动安装依赖（如 Fabric API）")
+        self.auto_yes_chk = QtWidgets.QCheckBox("自动确认模组匹配")
+        self.deps_chk = QtWidgets.QCheckBox("自动下载依赖")
         self.deps_chk.setChecked(True)
         self.data_master_chk = QtWidgets.QCheckBox("迁移数据")
         self.data_master_chk.setChecked(True)
@@ -626,7 +626,9 @@ class MainWindow(QtWidgets.QWidget):
         for name, fname in report["ok"]:
             self._log("  %s -> %s" % (name, fname))
         if report["skipped"]:
-            self._log("跳过 %d 个（库/非模组/重复）" % len(report["skipped"]))
+            self._log("跳过 %d 个（库/非模组）" % len(report["skipped"]))
+        if report.get("duplicates"):
+            self._log("重复项目合并 %d 个（同一项目只下载一次）" % len(report["duplicates"]))
         if report["manual"]:
             self._log("%d 个模组需要手动处理（详见报告文件）" % len(report["manual"]), "warn")
             for jname, meta, why in report["manual"]:

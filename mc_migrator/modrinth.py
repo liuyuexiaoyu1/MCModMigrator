@@ -270,9 +270,40 @@ def score_hit(meta, hit):
     return best, "标题相似度 %.2f" % best
 
 
-def match_to_project(meta, mc_version, loader, jar_path):
+_versions_cache = {}
+
+
+def _find_same_version(pid, jar_version, mc_version, loader):
+    if not jar_version:
+        return None
     try:
-        ver = mr_lookup_sha1(sha1_of(jar_path))
+        if pid not in _versions_cache:
+            _versions_cache[pid] = mr_versions(pid)
+        allv = _versions_cache[pid]
+    except requests.RequestException:
+        return None
+    for v in allv:
+        if (_same_version_number(v.get("version_number"), jar_version)
+                and (mc_version in v.get("game_versions", [])
+                     or any(ver_compatible(g, mc_version) for g in v.get("game_versions", [])))
+                and (not loader or loader in v.get("loaders", []))):
+            return v
+    return None
+
+
+def _same_version_number(mr_number, jar_version):
+    mr_number = (mr_number or "").lstrip("vV").strip()
+    jar_version = (jar_version or "").strip()
+    return (mr_number == jar_version
+            or mr_number.startswith(jar_version + "+")
+            or mr_number.startswith(jar_version + "-"))
+
+
+def match_to_project(meta, mc_version, loader, jar_path):
+    jar_sha1 = sha1_of(jar_path)
+
+    try:
+        ver = mr_lookup_sha1(jar_sha1)
         if ver and ver.get("project_id"):
             return ver["project_id"], 1.0, "源文件 sha1 与 Modrinth 完全一致"
     except requests.RequestException:
@@ -305,14 +336,33 @@ def match_to_project(meta, mc_version, loader, jar_path):
     if best and best[0] > 0:
         pid = best[2].get("project_id") or best[2].get("id")
         if pid:
-            jar_authors = best[4].get("authors") or []
+            m_used = best[4]
+            jar_version = (m_used.get("version") or "").strip()
+            jar_authors = m_used.get("authors") or []
+
+            members = None
             if best[0] >= ASK_CONF and jar_authors:
                 try:
                     members = project_members(pid)
                 except requests.RequestException:
                     members = None
-                if members and not authors_equal(jar_authors, members):
-                    return None, 0.0, "作者列表与 Modrinth 项目不一致（疑似 fork 版模组）"
+            if members:
+                if authors_equal(jar_authors, members):
+                    why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
+                    return pid, best[0], why + "（作者校验通过）"
+                if jar_version:
+                    same = _find_same_version(pid, jar_version, mc_version, loader)
+                    if same:
+                        files = same.get("files") or []
+                        f = next((x for x in files if x.get("primary")),
+                                 files[0] if files else None)
+                        fsha = ((f or {}).get("hashes") or {}).get("sha1") or ""
+                        if fsha and fsha.lower() == jar_sha1:
+                            return pid, 1.0, ("作者不一致，但同版本号 %s 且文件 sha1 完全一致"
+                                              "（原版文件）" % jar_version)
+                return None, 0.0, ("作者列表与 Modrinth 项目不一致，且同版本号文件校验未通过"
+                                   "（疑似 fork 版模组）")
+
             why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
             return pid, best[0], why
     return None, 0.0, "无搜索结果"
