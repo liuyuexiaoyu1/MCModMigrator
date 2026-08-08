@@ -1,0 +1,353 @@
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mod_migrator as mm  # noqa: E402
+
+PASS = 0
+
+
+def ok(cond, msg):
+    global PASS
+    if cond:
+        PASS += 1
+        print("  ✓ %s" % msg)
+    else:
+        print("  ✗ FAIL: %s" % msg)
+        raise SystemExit(1)
+
+
+def make_jar(path, entries):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, content in entries.items():
+            z.writestr(name, content)
+
+
+FORGE_TOML = """\
+modLoader="javafml"
+loaderVersion="[38,)"
+license="MIT"
+
+[[mods]]
+modId="jei"
+version="15.0.0"
+displayName="Just Enough Items"
+authors="mezz"
+
+[[dependencies.jei]]
+modId="forge"
+mandatory=true
+versionRange="[38,)"
+ordering="NONE"
+side="BOTH"
+"""
+
+NEOFORGE_TOML = """\
+modLoader="javafml"
+loaderVersion="[2,)"
+license="MIT"
+
+[[mods]]
+modId="sodium"
+version="0.5.11"
+displayName="Sodium"
+authors="jellysquid3"
+
+[[mods]]
+modId="sodium-extra"
+version="0.5.4"
+displayName="Sodium Extra"
+library="true"
+"""
+
+print("== 1. jar 元数据解析 ==")
+tmp = tempfile.mkdtemp(prefix="mcmod_test_")
+
+try:
+    # fabric
+    f = os.path.join(tmp, "fabric_mod.jar")
+    make_jar(f, {"fabric.mod.json": json.dumps({"id": "sodium", "name": "Sodium",
+                                                "version": "0.5.8"})})
+    m = mm.parse_mod_jar(f)
+    ok(m and m["id"] == "sodium" and m["name"] == "Sodium" and m["kind"] == "fabric",
+       "fabric.mod.json: %s" % m)
+
+    # quilt
+    q = os.path.join(tmp, "quilt_mod.jar")
+    make_jar(q, {"quilt.mod.json": json.dumps({"id": "quilted_fabric_api", "name": "QFAPI"})})
+    m = mm.parse_mod_jar(q)
+    ok(m and m["id"] == "quilted_fabric_api" and m["kind"] == "quilt", "quilt.mod.json")
+
+    # forge toml
+    fj = os.path.join(tmp, "forge_mod.jar")
+    make_jar(fj, {"META-INF/mods.toml": FORGE_TOML})
+    m = mm.parse_mod_jar(fj)
+    ok(m and m["id"] == "jei" and m["name"] == "Just Enough Items" and m["kind"] == "forge",
+       "mods.toml: %s" % m)
+
+    # neoforge toml
+    nj = os.path.join(tmp, "neoforge_mod.jar")
+    make_jar(nj, {"META-INF/neoforge.mods.toml": NEOFORGE_TOML})
+    m = mm.parse_mod_jar(nj)
+    ok(m and m["id"] == "sodium" and m["kind"] == "neoforge", "neoforge.mods.toml: %s" % m)
+    only_lib = os.path.join(tmp, "lib.jar")
+    make_jar(only_lib, {"META-INF/mods.toml": NEOFORGE_TOML})
+    m = mm.parse_mod_jar(only_lib)
+    ok(m and m["id"] == "sodium", "toml 中第二个 mod 带 library 标记不影响取第一个")
+
+    # mcmod.info
+    lj = os.path.join(tmp, "legacy_mod.jar")
+    make_jar(lj, {"mcmod.info": json.dumps([{"modid": "waila", "name": "Waila",
+                                             "version": "1.8.26"}])})
+    m = mm.parse_mod_jar(lj)
+    ok(m and m["id"] == "waila" and m["kind"] == "forge-legacy", "mcmod.info")
+
+    # 非模组 jar / 损坏 jar
+    bad = os.path.join(tmp, "not_a_mod.jar")
+    make_jar(bad, {"readme.txt": "hi"})
+    ok(mm.parse_mod_jar(bad) is None, "无元数据的 jar 返回 None")
+    bad2 = os.path.join(tmp, "broken.jar")
+    with open(bad2, "wb") as fh:
+        fh.write(b"this is not a zip file")
+    ok(mm.parse_mod_jar(bad2) is None, "损坏 jar 返回 None 不抛异常")
+
+    print("== 2. 置信度评分 ==")
+    meta = {"id": "sodium-extra", "name": "Sodium Extra", "version": "0.5.4"}
+    s, why = mm.score_hit(meta, {"slug": "sodium-extra", "title": "Sodium Extra", "id": "AANobbMI"})
+    ok(s == 1.0, "modid==slug 精确匹配 → %.2f (%s)" % (s, why))
+    s, why = mm.score_hit(meta, {"slug": "sodium", "title": "Sodium"})
+    ok(s >= mm.ASK_CONF and s < 1.0, "部分匹配 sodium → %.2f (%s)" % (s, why))
+    s, why = mm.score_hit(meta, {"slug": "create", "title": "Create"})
+    ok(s < mm.ASK_CONF, "无关项目低分 → %.2f" % s)
+    s, why = mm.score_hit({"id": "jade", "name": "Jade"}, {"slug": "jade", "title": "Jade 🔍"})
+    ok(s == 1.0, "标题含 emoji 仍精确匹配 → %.2f" % s)
+
+    print("== 3. 杂项目录识别 ==")
+    game_root = os.path.join(tmp, "game_root")
+    os.makedirs(os.path.join(game_root, "journeymap"))
+    os.makedirs(os.path.join(game_root, "waystones"))
+    os.makedirs(os.path.join(game_root, "saves"))
+    os.makedirs(os.path.join(game_root, "logs"))
+    os.makedirs(os.path.join(game_root, "resourcepacks"))
+    os.makedirs(os.path.join(game_root, ".fabric"))
+    open(os.path.join(game_root, "options.txt"), "w").close()
+    open(os.path.join(game_root, "servers.dat"), "w").close()
+    open(os.path.join(game_root, "random_file.bin"), "w").close()
+    dirs, files = mm.find_stray(game_root)
+    ok(dirs == ["journeymap", "waystones"],
+       "仅识别模组目录: %s" % dirs)
+    ok(files == ["random_file.bin"], "仅识别模组文件: %s" % files)
+    # 版本隔离
+    iso_root = os.path.join(tmp, "iso_root")
+    os.makedirs(os.path.join(iso_root, "versions", "1.20.1-fabric"), exist_ok=True)
+    open(os.path.join(iso_root, "1.20.1-fabric.json"), "w").close()
+    open(os.path.join(iso_root, "journeymap.txt"), "w").close()
+    d2, f2 = mm.find_stray(iso_root)
+    ok(f2 == ["journeymap.txt"], "版本 json 不参与杂项迁移: %s" % f2)
+
+    print("== 4. 客户端目录识别（版本隔离）==")
+    mc = os.path.join(tmp, "minecraft")
+    iso = os.path.join(mc, "versions", "1.20.1-fabric")
+    noniso = os.path.join(mc, "versions", "1.20.1-vanilla")
+    os.makedirs(os.path.join(iso, "mods"))
+    os.makedirs(noniso)
+    root, isolated = mm.client_paths(mc, "1.20.1-fabric")
+    ok(isolated and root == iso, "版本隔离识别正确")
+    root, isolated = mm.client_paths(mc, "1.20.1-vanilla")
+    ok(not isolated and root == mc, "非隔离客户端回退到根目录")
+    root, isolated = mm.client_paths(mc, "1.20.1-vanilla", force_isolated=True)
+    ok(isolated and root == noniso, "显式直选版本目录时强制按隔离布局处理")
+    ok(mm.resolve_version_dir(iso) == (mc, "1.20.1-fabric"), "识别 versions/<版本> 隔离目录")
+    ok(mm.resolve_version_dir(mc) is None, ".minecraft 根目录不是版本目录")
+    ok(mm.resolve_version_dir(os.path.join(mc, "versions")) is None, "versions 目录本身不是版本目录")
+    # 加载器识别
+    vj = os.path.join(iso, "1.20.1-fabric.json")
+    with open(vj, "w", encoding="utf-8") as fh:
+        fh.write('{"id": "1.20.1-fabric", "libraries": [{"name": "net.fabricmc:fabric-loader:0.15.10"}]}')
+    ok(mm.detect_loader(mc, "1.20.1-fabric") == "fabric", "从版本 json 识别 fabric")
+    nj = os.path.join(noniso, "1.20.1-vanilla.json")
+    with open(nj, "w", encoding="utf-8") as fh:
+        fh.write('{"id": "1.20.1-vanilla", "libraries": [{"name": "net.neoforged:neoforge:20.4.223"}]}')
+    ok(mm.detect_loader(mc, "1.20.1-vanilla") == "neoforge", "neoforge 优先于 forge 识别")
+    fg = os.path.join(tmp, "minecraft2", "versions", "forge180")
+    os.makedirs(fg)
+    with open(os.path.join(fg, "forge180.json"), "w", encoding="utf-8") as fh:
+        fh.write('{"libraries": [{"name": "net.minecraftforge:forge:1.18-38.0.17"}]}')
+    ok(mm.detect_loader(os.path.join(tmp, "minecraft2"), "forge180") == "forge", "识别 forge")
+
+    print("== 5. 版本兼容判断 ==")
+    ok(mm.ver_compatible("1.20.1", "1.20.1"), "精确一致")
+    ok(mm.ver_compatible("1.20.1", "1.20"), "前缀兼容 (1.20.1 ⊃ 1.20)")
+    ok(not mm.ver_compatible("1.21.1", "1.20.1"), "不兼容")
+
+    print("== 6. wrapper 模组嵌套解析 ==")
+    import io
+    def make_jar_bytes(entries):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zz:
+            for name, content in entries.items():
+                zz.writestr(name, content)
+        return buf.getvalue()
+
+    w = os.path.join(tmp, "wrapper_gca.jar")
+    with zipfile.ZipFile(w, "w", zipfile.ZIP_DEFLATED) as zz:
+        zz.writestr("fabric.mod.json", json.dumps(
+            {"id": "gca_wrapper", "name": "gugle-carpet-addition-Wrapper", "version": "1.0.6"}))
+        zz.writestr("META-INF/jars/gca-real.jar", make_jar_bytes(
+            {"fabric.mod.json": json.dumps({"id": "gca", "name": "gugle-carpet-addition", "version": "2.12.6"})}))
+        zz.writestr("META-INF/jars/gca-real-dup.jar", make_jar_bytes(
+            {"fabric.mod.json": json.dumps({"id": "gca", "name": "gugle-carpet-addition", "version": "2.12.6"})}))
+        zz.writestr("META-INF/jars/jep-2.24.jar", make_jar_bytes(
+            {"fabric.mod.json": json.dumps({"id": "jep_jep", "name": "jep", "version": "2.24"})}))
+    m = mm.parse_mod_jar(w)
+    ok(m and m["id"] == "gca_wrapper" and m["name"] == "gugle-carpet-addition-Wrapper",
+       "外层 wrapper 元数据: %s" % (m["id"] if m else None))
+    ok(len(m.get("nested", [])) == 2 and m["nested"][0]["id"] == "gca",
+       "提取内嵌真实模组 jar 元数据（去重后）: %s" % [x["id"] for x in m.get("nested", [])])
+    ok(m["nested"][0]["name"] == "gugle-carpet-addition", "内嵌 name 为真实模组名")
+    ok(mm.is_wrapper_meta(m), "识别为 wrapper 模组")
+    ok(mm.wrapper_base_id(m) == "gca", "wrapper 基底 id: gca")
+    ok(not mm.is_wrapper_meta({"id": "sodium", "name": "Sodium"}), "普通模组不是 wrapper")
+    # 纯 wrapper
+    w2 = os.path.join(tmp, "pure_wrapper.jar")
+    with zipfile.ZipFile(w2, "w", zipfile.ZIP_DEFLATED) as zz:
+        zz.writestr("META-INF/jars/inner.jar", make_jar_bytes(
+            {"fabric.mod.json": json.dumps({"id": "gca", "name": "gugle-carpet-addition"})}))
+    m2 = mm.parse_mod_jar(w2)
+    ok(m2 and m2["id"] == "gca", "纯 wrapper 直接用内嵌真实模组元数据")
+    # jarjar
+    j = os.path.join(tmp, "forge_with_jarjar.jar")
+    with zipfile.ZipFile(j, "w", zipfile.ZIP_DEFLATED) as zz:
+        zz.writestr("META-INF/mods.toml",
+                    'modLoader="javafml"\n\n[[mods]]\nmodId="jei"\ndisplayName="Just Enough Items"\n')
+        zz.writestr("META-INF/jarjar/mixin-extras.jar", make_jar_bytes(
+            {"META-INF/mods.toml": 'modLoader="javafml"\n\n[[mods]]\nmodId="mixinextras"\ndisplayName="MixinExtras"\n'}))
+    m3 = mm.parse_mod_jar(j)
+    ok(m3["id"] == "jei" and len(m3.get("nested", [])) == 1
+       and not mm.is_wrapper_meta(m3), "jarjar 内嵌库不误判为 wrapper")
+
+    print("== 7. MC 版本号提取（Mojang 清单名）==")
+    known = ["1.21.4", "1.21.1", "1.21", "1.20.6", "1.20.1", "1.20", "1.16.5"]
+    ok(mm.base_mc_version("1.20.1-fabric", known) == "1.20.1", "1.20.1-fabric → 1.20.1")
+    ok(mm.base_mc_version("1.21-fabric", known) == "1.21", "1.21-fabric → 1.21")
+    ok(mm.base_mc_version("1.20.10-fabric", ["1.21", "1.20.10", "1.20.1"]) == "1.20.10",
+       "1.20.10-fabric 不会被误判为 1.20.1")
+    ok(mm.base_mc_version("22w43a") == "", "快照名无法提取 → 空串")
+    ok(mm.base_mc_version("1.16.5-optifine") == "1.16.5", "正则兜底 1.16.5-optifine")
+    ok(mm.base_mc_version("") == "", "空名返回空")
+    # 从版本 json 自动读取目标版本
+    ok(mm.detect_target_mc(mc, "1.20.1-fabric") == "1.20.1", "detect_target_mc 从版本 json 读出 1.20.1")
+    ok(mm.detect_target_mc(mc, "no-such-version") == "", "不存在的版本返回空")
+
+    print("== 8. sniff 服务端加载器（缓存）==")
+    srv = os.path.join(tmp, "srv_cache")
+    os.makedirs(os.path.join(srv, "mods"), exist_ok=True)
+    make_jar(os.path.join(srv, "mods", "sodium_fake.jar"),
+             {"fabric.mod.json": json.dumps({"id": "sodium", "name": "Sodium"})})
+    ok(mm.sniff_server_loader(srv) == "fabric", "服务端加载器识别")
+    ok(mm.sniff_server_loader(srv) == "fabric", "重复调用结果一致（缓存命中）")
+    ok(mm.sniff_server_loader(os.path.join(tmp, "no_such_dir")) is None, "目录不存在返回 None")
+
+    print("== 9. 作者提取与 fork 防护 ==")
+    fa = os.path.join(tmp, "authors_fabric.jar")
+    make_jar(fa, {"fabric.mod.json": json.dumps({"id": "m1", "name": "M1",
+        "authors": [{"name": "Alice"}, "bob", {"name": "Charlie", "contact": {}}]})})
+    ok(mm.parse_mod_jar(fa)["authors"] == ["Alice", "bob", "Charlie"],
+       "fabric 作者提取(字典/字符串混合): %s" % mm.parse_mod_jar(fa)["authors"])
+    fa2 = os.path.join(tmp, "authors_fabric2.jar")
+    make_jar(fa2, {"fabric.mod.json": json.dumps({"id": "m2", "name": "M2", "authors": "SingleAuthor"})})
+    ok(mm.parse_mod_jar(fa2)["authors"] == ["SingleAuthor"], "fabric 字符串作者")
+    ta = os.path.join(tmp, "authors_toml.jar")
+    make_jar(ta, {"META-INF/mods.toml":
+                  'modLoader="javafml"\n[[mods]]\nmodId="m3"\ndisplayName="M3"\nauthors="Alice, Bob"\n'})
+    ok(mm.parse_mod_jar(ta)["authors"] == ["Alice", "Bob"], "toml 作者逗号拆分")
+    ok(mm.authors_equal(["Alice", "bob"], ["bob", "Alice"]), "顺序无关的严格一致")
+    ok(not mm.authors_equal(["Alice"], ["EvilForker"]), "fork 作者不一致")
+    ok(not mm.authors_equal(["Alice"], ["Alice", "Bob"]), "成员多一人也不一致")
+    ok(not mm.authors_equal([], ["Alice"]), "空作者视为无法校验")
+
+    print("== 10. 限速解析与并发下载器 ==")
+    ok(mm.parse_retry_after("5") == 5, "Retry-After 秒数")
+    ok(mm.parse_retry_after("9999") == 60, "Retry-After 上限 60 秒")
+    ok(mm.parse_retry_after(None) == 0, "无 Retry-After 返回 0")
+    ok(1 <= mm.parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") <= 60, "HTTP 日期兜底")
+
+    def fake_worker(file_info, dest_dir):
+        time.sleep(0.15)
+        p = os.path.join(dest_dir, file_info["name"])
+        open(p, "w").write("x")
+        return p, None
+
+    dl_dir = os.path.join(tmp, "dl")
+    os.makedirs(dl_dir)
+    d = mm.Downloader(max_workers=4, worker=fake_worker)
+    t0 = time.time()
+    for i in range(3):
+        d.submit("f%d" % i, {"name": "f%d.bin" % i}, dl_dir)
+    res = d.gather()
+    d.shutdown()
+    elapsed = time.time() - t0
+    ok(len(res) == 3 and all(r[3] for r in res), "3 个下载全部完成")
+    ok(elapsed < 0.45, "并发生效（3×0.15s 任务实际耗时 %.2fs）" % elapsed)
+    ok([r[0] for r in res] == ["f0", "f1", "f2"], "gather 按提交顺序返回")
+
+    print("== 10.5 存档重名处理（加 _old）==")
+    s_saves = os.path.join(tmp, "src_saves")
+    d_saves = os.path.join(tmp, "dst_saves")
+    for w in ("world1", "world2", "world1_old"):
+        os.makedirs(os.path.join(s_saves, w), exist_ok=True)
+        open(os.path.join(s_saves, w, "level.dat"), "w").write(w)
+    os.makedirs(os.path.join(d_saves, "world1"), exist_ok=True)
+    open(os.path.join(d_saves, "world1", "level.dat"), "w").write("old-target")
+    os.makedirs(os.path.join(d_saves, "world1_old"), exist_ok=True)
+    open(os.path.join(d_saves, "world1_old", "level.dat"), "w").write("old-target-2")
+    n, r = mm.copy_saves_merge(s_saves, d_saves)
+    ok(n == 3 and r == 2, "复制 3 项、重名改名 2 项: %s" % ((n, r),))
+    ok(open(os.path.join(d_saves, "world1", "level.dat")).read() == "old-target",
+       "目标旧世界 world1 未被覆盖")
+    ok(open(os.path.join(d_saves, "world1_old", "level.dat")).read() == "old-target-2",
+       "目标旧世界 world1_old 未被覆盖")
+    ok(open(os.path.join(d_saves, "world1_old_old", "level.dat")).read() == "world1",
+       "源 world1 复制为 world1_old_old（两级重名）")
+    ok(open(os.path.join(d_saves, "world1_old_old_old", "level.dat")).read() == "world1_old",
+       "源 world1_old 复制为 world1_old_old_old")
+    ok(open(os.path.join(d_saves, "world2", "level.dat")).read() == "world2",
+       "无重名 world2 正常复制")
+
+    print("== 11. 版本挑选：无适配目标版本绝不下载 ==")
+    import mc_migrator.modrinth as _mr
+    _orig_versions = _mr.mr_versions
+
+    def fake_versions(pid, mc_version=None, loader=None):
+        if mc_version and loader:
+            return []
+        return [
+            {"id": "v3", "version_number": "1.2.0", "date_published": "2026-03-01",
+             "game_versions": ["1.20"], "loaders": ["fabric"], "version_type": "release"},
+            {"id": "v2", "version_number": "1.1.0", "date_published": "2026-02-01",
+             "game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "release"},
+            {"id": "v1", "version_number": "1.0.0", "date_published": "2026-01-01",
+             "game_versions": ["1.21"], "loaders": ["fabric"], "version_type": "release"},
+        ]
+
+    _mr.mr_versions = fake_versions
+    try:
+        ver, warn = _mr.pick_version("p", "26.2", "fabric")
+        ok(ver and ver["version_number"] == "1.1.0", "目标 26.2 精确命中最新版本")
+        ver, warn = _mr.pick_version("p", "1.20.1", "fabric")
+        ok(ver and ver["version_number"] == "1.2.0" and warn, "1.20 补丁兼容 1.20.1（带警告）")
+        ver, warn = _mr.pick_version("p", "27.0", "fabric")
+        ok(ver is None and warn is None, "目标 27.0 无适配版本 → 不下载（进手动清单）")
+        ver, warn = _mr.pick_version("p", "26.2", "forge")
+        ok(ver is None, "加载器不一致（只有 fabric 版）→ 不下载")
+    finally:
+        _mr.mr_versions = _orig_versions
+
+    print("\n全部通过: %d 项断言" % PASS)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
