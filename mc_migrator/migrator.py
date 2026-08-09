@@ -1,5 +1,6 @@
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from .core import (ASK_CONF, CHOICE_KEYS, HIGH_CONF, KNOWN_DIRS, KNOWN_FILES,
@@ -8,7 +9,8 @@ from .core import (ASK_CONF, CHOICE_KEYS, HIGH_CONF, KNOWN_DIRS, KNOWN_FILES,
 from .clients import client_paths, detect_loader, is_server_root, sniff_server_loader
 from .mod_parser import parse_mod_jar
 from .modrinth import (Downloader, collect_deps, configure_http,
-                       match_to_project, pick_version, primary_filename)
+                       match_to_project, mr_download_file, pick_version,
+                       pick_version_in_range, primary_filename)
 
 
 def _make_dep_logger(base, report):
@@ -20,18 +22,57 @@ def _make_dep_logger(base, report):
 
 class RunConfig:
     def __init__(self, auto_yes=False, skip_deps=False, choices=None,
-                 use_system_proxy=True, download_threads=4, print_failures=True,
-                 log=None, confirm=None):
+                 use_system_proxy=True, download_threads=4, analysis_threads=4,
+                 print_failures=True, ignore_fork=False, log=None, confirm=None):
         self.auto_yes = auto_yes
         self.skip_deps = skip_deps
         self.use_system_proxy = use_system_proxy
         self.download_threads = max(1, min(int(download_threads or 4), 16))
+        self.analysis_threads = max(1, min(int(analysis_threads or 8), 16))
         self.print_failures = print_failures
+        self.ignore_fork = ignore_fork
+        self.on_conflicts = None
         self.choices = choices or {k: True for k in CHOICE_KEYS}
         self.log = log or Logger(plain_log_sink)
         self.confirm = confirm or (lambda p: True)
 
-def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report, stop_event=None):
+def _match_one(i, jname, meta, jpath, mc_version, src_mc_version, loader, cfg, stop_event,
+               target_mods_dir):
+    if stop_event is not None and stop_event.is_set():
+        return ("stopped",)
+    if not meta:
+        return ("skip", "无法解析该 jar（可能不是模组或文件损坏），跳过")
+    if meta.get("library"):
+        return ("skip", "%s 是库文件（library=true），跳过" % meta.get("id"))
+    cfg.log.info("正在查询 Modrinth 匹配 %s ..." % (meta.get("name") or meta.get("id")))
+    project_id, confidence, reason, matched_file = match_to_project(
+        meta, mc_version, loader, jpath, ignore_fork=cfg.ignore_fork,
+        src_mc_version=src_mc_version, compare_dir=target_mods_dir)
+    if reason and "已按选项忽略" in reason:
+        cfg.log.warn(reason)
+    if reason and "mcmod.cn" in reason:
+        cfg.log.info(reason)
+    if project_id is None:
+        return ("manual", jname, meta, reason or "未找到匹配")
+    if confidence < ASK_CONF:
+        return ("manual", jname, meta, "置信度不足 (%.2f)" % confidence)
+    if matched_file:
+        return ("matched", jname, meta, project_id, matched_file)
+    if confidence < HIGH_CONF and not cfg.auto_yes:
+        ver, warn = pick_version(project_id, mc_version, loader)
+        if not ver:
+            return ("manual", jname, meta, "无适配目标加载器/版本的版本")
+        return ("confirm", jname, meta, project_id, confidence, reason, ver, warn)
+    if confidence < HIGH_CONF:
+        cfg.log.info("置信度 %.2f（%s），自动确认" % (confidence, reason))
+    ver, warn = pick_version(project_id, mc_version, loader)
+    if not ver:
+        return ("manual", jname, meta, "无适配目标加载器/版本的版本")
+    return ("ok", jname, meta, project_id, ver, warn)
+
+
+def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
+                 stop_event=None, graph=None, src_mc_version=None):
     os.makedirs(target_mods_dir, exist_ok=True)
     jars = sorted(f for f in os.listdir(src_mods_dir) if f.lower().endswith(".jar"))
     if not jars:
@@ -40,61 +81,94 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
 
     downloader = Downloader(max_workers=cfg.download_threads)
     downloaded_projects = set()
+    matched_items = []
     n_total = len(jars)
-    for i, jname in enumerate(jars, 1):
-        if stop_event is not None and stop_event.is_set():
-            cfg.log.info("已由用户停止。")
-            break
-        jpath = os.path.join(src_mods_dir, jname)
-        cfg.log.info("[%d/%d] 处理: %s" % (i, n_total, jname))
-        cfg.log.info("正在解包解析元数据: %s ..." % jname)
-        meta = parse_mod_jar(jpath)
-        if meta:
-            cfg.log.info("正在查询 Modrinth 匹配 %s ..." % (meta.get("name") or meta.get("id")))
-        if not meta:
-            report["skipped"].append(jname)
-            cfg.log.warn("无法解析该 jar（可能不是模组或文件损坏），跳过")
-            continue
-        if meta.get("library"):
-            report["skipped"].append(jname)
-            cfg.log.warn("%s 是库文件（library=true），跳过" % meta.get("id"))
-            continue
 
-        project_id, confidence, reason = match_to_project(meta, mc_version, loader, jpath)
-        if project_id is None:
-            report["manual"].append((jname, meta, reason or "未找到匹配"))
-            cfg.log.warn("%s，已记入手动清单" % (reason or "未找到匹配"))
-            continue
-        if project_id in downloaded_projects:
-            report["duplicates"].append(jname)
-            cfg.log.info("该项目此前已下载，合并重复（%s）" % project_id)
-            continue
-        if confidence < ASK_CONF:
-            report["manual"].append((jname, meta, "置信度不足 (%.2f)" % confidence))
-            cfg.log.warn("置信度 %.2f 不足（%s），已记入手动清单" % (confidence, reason))
-            continue
+    if stop_event is not None and stop_event.is_set():
+        cfg.log.info("已由用户停止。")
+        return
 
-        if confidence < HIGH_CONF:
-            hit_name = "（项目 %s）" % project_id
-            if not cfg.auto_yes:
-                if not cfg.confirm("置信度 %.2f 匹配到 %s%s，是否下载？" % (confidence, hit_name, reason)):
-                    report["manual"].append((jname, meta, "用户拒绝"))
-                    cfg.log.info("用户拒绝，已记入手动清单")
-                    continue
-            else:
-                cfg.log.info("置信度 %.2f（%s），自动确认" % (confidence, reason))
+    cfg.log.info("阶段一：全部解包解析元数据（%d 个 jar）..." % n_total)
+    metas = [None] * n_total
+    with ThreadPoolExecutor(max_workers=cfg.analysis_threads) as pool:
+        for i, jname in enumerate(jars):
+            metas[i] = pool.submit(parse_mod_jar, os.path.join(src_mods_dir, jname))
+        for i in range(n_total):
+            try:
+                metas[i] = metas[i].result()
+            except Exception:
+                metas[i] = None
 
-        ver, warn = pick_version(project_id, mc_version, loader)
-        if not ver:
-            report["manual"].append((jname, meta, "无适配目标加载器/版本的版本"))
-            cfg.log.warn("该项目没有适配 %s %s 的版本，已记入手动清单"
-                         % (LOADER_LABEL.get(loader, loader), mc_version))
+    cfg.log.info("阶段二：全部搜索 Modrinth 匹配 ...")
+    outcomes = [None] * n_total
+    with ThreadPoolExecutor(max_workers=cfg.analysis_threads) as pool:
+        for i, jname in enumerate(jars):
+            if stop_event is not None and stop_event.is_set():
+                break
+            cfg.log.info("[%d/%d] 处理: %s" % (i + 1, n_total, jname))
+            outcomes[i] = pool.submit(
+                _match_one, i, jname, metas[i], os.path.join(src_mods_dir, jname),
+                mc_version, src_mc_version, loader, cfg, stop_event, target_mods_dir)
+        for i in range(n_total):
+            if outcomes[i] is None:
+                continue
+            try:
+                outcomes[i] = outcomes[i].result()
+            except Exception as e:
+                outcomes[i] = ("manual", jars[i], None, "分析异常: %s" % e)
+
+    for out in outcomes:
+        if out is None or out[0] == "stopped":
             continue
+        kind = out[0]
+        if kind == "skip":
+            report["skipped"].append(out[1])
+            cfg.log.warn(out[1])
+            continue
+        if kind == "manual":
+            jname, meta, reason = out[1], out[2], out[3]
+            report["manual"].append((jname, meta, reason))
+            cfg.log.warn("%s，已记入手动清单" % reason)
+            continue
+        if kind == "matched":
+            jname, meta, project_id, matched_file = out[1:]
+            if project_id in downloaded_projects:
+                report["duplicates"].append(jname)
+                try:
+                    os.remove(matched_file)
+                except OSError:
+                    pass
+                cfg.log.info("该项目此前已下载，合并重复（%s）" % project_id)
+                continue
+            downloaded_projects.add(project_id)
+            size = human_size(os.path.getsize(matched_file)) if os.path.exists(matched_file) else "?"
+            report["ok"].append((meta.get("name") or meta.get("id"), os.path.basename(matched_file)))
+            cfg.log.info("比对命中: %s (%s)" % (os.path.basename(matched_file), size))
+            matched_items.append((meta.get("name") or meta.get("id"), "mod",
+                                  (jname, meta, project_id), matched_file))
+            continue
+        if kind == "confirm":
+            jname, meta, project_id, confidence, reason, ver, warn = out[1:]
+            if project_id in downloaded_projects:
+                report["duplicates"].append(jname)
+                cfg.log.info("该项目此前已下载，合并重复（%s）" % project_id)
+                continue
+            if not cfg.confirm("置信度 %.2f 匹配到（项目 %s）%s，是否下载？"
+                               % (confidence, project_id, reason)):
+                report["manual"].append((jname, meta, "用户拒绝"))
+                cfg.log.info("用户拒绝，已记入手动清单")
+                continue
+        else:
+            jname, meta, project_id, ver, warn = out[1:]
+            if project_id in downloaded_projects:
+                report["duplicates"].append(jname)
+                cfg.log.info("该项目此前已下载，合并重复（%s）" % project_id)
+                continue
         downloaded_projects.add(project_id)
         fname = primary_filename(ver) or "mod.jar"
         cfg.log.info("提交下载: %s" % fname)
         downloader.submit(meta.get("name") or meta.get("id"), ver, target_mods_dir,
-                          kind="mod", extra=(jname, meta))
+                          kind="mod", extra=(jname, meta, project_id))
         if warn:
             cfg.log.warn(warn)
         if not cfg.skip_deps:
@@ -108,7 +182,7 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
         if dest:
             size = human_size(os.path.getsize(dest)) if os.path.exists(dest) else "?"
             if kind == "mod":
-                jname, meta = extra
+                jname, meta, pid = extra
                 report["ok"].append((label, os.path.basename(dest)))
                 cfg.log.info("已下载: %s (%s)" % (os.path.basename(dest), size))
             else:
@@ -116,11 +190,81 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
                 cfg.log.info("依赖 %s -> %s (%s)" % (label, os.path.basename(dest), size))
         else:
             if kind == "mod":
-                jname, meta = extra
+                jname, meta, pid = extra
                 report["manual"].append((jname, meta, "下载失败: %s" % err))
                 cfg.log.error("下载失败: %s" % err)
             else:
                 cfg.log.error("依赖 %s 下载失败: %s" % (label, err))
+
+    if graph:
+        cfg.log.info("全部下载完成，正在解包并构建依赖图 ...")
+        graph_items = [(r[0], r[1], r[2], r[3]) for r in results if r[3]] + matched_items
+        for label, kind, extra, dest in graph_items:
+            pid = extra[2] if kind == "mod" else extra
+            gmeta = parse_mod_jar(dest)
+            if gmeta:
+                graph.add_mod(gmeta.get("id") or label, gmeta.get("name") or label,
+                              gmeta.get("version") or "", dest, pid,
+                              gmeta.get("deps") or [], gmeta.get("conflicts") or [])
+        _pin_dependency_versions(graph, mc_version, loader, target_mods_dir, cfg, report)
+
+
+def _pin_dependency_versions(graph, mc_version, loader, target_mods_dir, cfg, report):
+    for a, b, ranges, bver in graph.mismatches():
+        binfo = graph.mods.get(b)
+        if not binfo or not binfo.get("project_id"):
+            continue
+        ver = pick_version_in_range(binfo["project_id"], mc_version, loader,
+                                    graph.requirements_for(b))
+        if not ver or ver.get("version_number") == bver:
+            continue
+        old = binfo.get("file")
+        dest, err = mr_download_file(ver, target_mods_dir)
+        if not dest:
+            cfg.log.warn("无法为 %s 更换到满足 %s 依赖的版本: %s" % (b, a, err))
+            continue
+        if old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(dest):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        binfo["file"] = dest
+        binfo["version"] = ver.get("version_number") or ""
+        cfg.log.info("%s 依赖 %s@%s，已将 %s 更换为版本 %s"
+                     % (a, b, ",".join(ranges), b, ver.get("version_number")))
+        report["ok"] = [(n, f) for n, f in report["ok"] if f != os.path.basename(old)] + \
+                       [(binfo.get("name") or b, os.path.basename(dest))]
+
+
+def resolve_conflicts(graph, cfg):
+    conflicts = graph.conflict_report()
+    if not conflicts:
+        return []
+    if cfg.on_conflicts:
+        action = cfg.on_conflicts(conflicts)
+    else:
+        action = "skip"
+    if action == "delete_c":
+        targets = [item["mod"] for item in conflicts]
+        for item in conflicts:
+            targets += item["dependents"]
+    elif action == "delete_conflicts":
+        targets = []
+        for item in conflicts:
+            targets += item["conflicting"]
+    else:
+        for item in conflicts:
+            cfg.log.warn("模组 %s 被 %d 个模组依赖、与 %d 个模组冲突（忽略，未处理）"
+                         % (item["name"], len(item["dependents"]), len(item["conflicting"])))
+        return []
+    removed = []
+    for mid in sorted(set(targets)):
+        info = graph.remove(mid)
+        if info and info.get("file") and os.path.exists(info["file"]):
+            os.remove(info["file"])
+            removed.append(os.path.basename(info["file"]))
+            cfg.log.warn("已删除 %s（%s）" % (mid, os.path.basename(info["file"])))
+    return removed
 
 def dir_size(path):
     total = 0
@@ -184,6 +328,8 @@ def find_stray(root):
                              if os.path.isdir(os.path.join(vdir, n))}
         except OSError:
             pass
+    base = os.path.basename(os.path.normpath(root))
+    launcher_files = {base + ".jar", base + ".json"}
     dirs, files = [], []
     try:
         entries = os.listdir(root)
@@ -196,6 +342,8 @@ def find_stray(root):
         if low in KNOWN_DIRS or low in KNOWN_FILES:
             continue
         if low in OPTIONAL_DIRS or low in OPTIONAL_FILES:
+            continue
+        if e in launcher_files:
             continue
         if e.endswith(".json") and e[:-5] in version_names:
             continue
@@ -333,13 +481,25 @@ def run_migration(params, cfg):
     cfg.log.info("\n=== 模组迁移（源 mods 目录: %s）===" % src_mods)
 
     report = {"ok": [], "manual": [], "deps": [], "skipped": [], "duplicates": []}
-    migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event)
+    from .graph import ModGraph
+    from .versions import base_mc_version
+    graph = ModGraph()
+    src_mc_ver = base_mc_version(src_version) if src_version else ""
+    migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event, graph,
+                 src_mc_version=src_mc_ver)
 
     if not same_client:
         migrate_game_data(src_client, dst_client, cfg)
 
     if cfg.print_failures and report["manual"]:
         print_failure_links(report["manual"], cfg.log)
+
+    if graph.mods:
+        n_mods, n_deps, n_confs = graph.summary()
+        cfg.log.info("依赖图统计: %d 个模组, %d 条依赖, %d 条冲突" % (n_mods, n_deps, n_confs))
+        removed = resolve_conflicts(graph, cfg)
+        if removed:
+            report["ok"] = [(n, f) for n, f in report["ok"] if f not in removed]
     return report, same_client
 
 
@@ -398,13 +558,9 @@ def write_report_file(report, src_desc, dst_desc):
         lines.append("")
         lines.append("跳过 %d 个（库文件/非模组）:" % len(report["skipped"]))
         lines += ["  · " + j for j in report["skipped"]]
-    if report.get("duplicates"):
-        lines.append("")
-        lines.append("重复项目合并 %d 个（同一项目只下载一次）:" % len(report["duplicates"]))
-        lines += ["  · " + j for j in report["duplicates"]]
     if report["manual"]:
         lines.append("")
-        lines.append("⚠ 需要手动处理 %d 个:" % len(report["manual"]))
+        lines.append("需要手动处理 %d 个:" % len(report["manual"]))
         for jname, meta, why in report["manual"]:
             q = meta.get("name") or meta.get("id") or jname
             lines.append("  - %s（%s）" % (jname, why))

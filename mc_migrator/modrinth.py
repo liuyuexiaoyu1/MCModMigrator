@@ -1,3 +1,4 @@
+import base64
 import difflib
 import json
 import os
@@ -5,6 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 import requests
 
@@ -12,6 +14,7 @@ from .core import ASK_CONF, USER_AGENT, LOADER_LABEL, effective_proxies, human_s
 from .mod_parser import is_wrapper_meta, sha1_of, wrapper_base_id
 
 API_BASE = "https://api.modrinth.com/v2"
+_SESSION = requests.Session()
 
 _RATE_LOCK = threading.Lock()
 _RATE_UNTIL = 0.0
@@ -53,7 +56,7 @@ def _throttle_wait(response):
 def mr_get(path, params=None, retries=3):
     for attempt in range(retries + 2):
         try:
-            r = requests.get(API_BASE + "/" + path, params=params,
+            r = _SESSION.get(API_BASE + "/" + path, params=params,
                              headers={"User-Agent": USER_AGENT}, timeout=30,
                              proxies=effective_proxies())
             if r.status_code == 404:
@@ -115,7 +118,7 @@ def mr_download_file(file_info, dest_dir):
     dest = os.path.join(dest_dir, fname)
     for attempt in range(4):
         try:
-            r = requests.get(url, stream=True, headers={"User-Agent": USER_AGENT},
+            r = _SESSION.get(url, stream=True, headers={"User-Agent": USER_AGENT},
                              timeout=(10, 30), proxies=effective_proxies())
             if r.status_code == 429:
                 _throttle_wait(r)
@@ -163,6 +166,22 @@ def pick_version(project_id, mc_version, loader):
                          % (mc_version, LOADER_LABEL.get(loader, loader),
                             cand[0].get("version_number")))
     return None, None
+
+
+def pick_version_in_range(project_id, mc_version, loader, ranges):
+    from .graph import version_satisfies
+    if not ranges:
+        return pick_version(project_id, mc_version, loader)[0]
+    vs = mr_versions(project_id, mc_version, loader)
+    if not vs:
+        vs = mr_versions(project_id)
+    for v in vs:
+        if ((mc_version in v.get("game_versions", [])
+             or any(ver_compatible(g, mc_version) for g in v.get("game_versions", [])))
+                and (not loader or loader in v.get("loaders", []))
+                and all(version_satisfies(v.get("version_number"), r) for r in ranges)):
+            return v
+    return None
 
 
 _members_cache = {}
@@ -299,13 +318,86 @@ def _same_version_number(mr_number, jar_version):
             or mr_number.startswith(jar_version + "-"))
 
 
-def match_to_project(meta, mc_version, loader, jar_path):
+def _mcmod_search(query):
+    url = "https://search.mcmod.cn/s?key=" + quote(query)
+    r = _SESSION.get(url, headers={"User-Agent": USER_AGENT}, timeout=20,
+                     proxies=effective_proxies())
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    m = re.search(r'href="(https?://www\.mcmod\.cn/class/\d+\.html)"', r.text)
+    return m.group(1) if m else None
+
+
+def _mcmod_modrinth_url(class_url):
+    r = _SESSION.get(class_url, headers={"User-Agent": USER_AGENT}, timeout=20,
+                     proxies=effective_proxies())
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    for m in re.finditer(r'href="//link\.mcmod\.cn/target/([A-Za-z0-9+/=]+)"', r.text):
+        try:
+            decoded = base64.b64decode(m.group(1)).decode("utf-8", "replace")
+        except Exception:
+            continue
+        if "modrinth.com" in decoded:
+            return decoded
+    return None
+
+
+def _modrinth_id_from_url(url):
+    m = re.search(r"modrinth\.com/(?:mod|project|plugin)/([^/?#]+)", url or "")
+    return m.group(1) if m else None
+
+
+def resolve_via_mcmod(meta):
+    query = (meta.get("name") or meta.get("id") or "").strip()
+    if not query:
+        return None
+    try:
+        class_url = _mcmod_search(query)
+        if not class_url:
+            return None
+        link = _mcmod_modrinth_url(class_url)
+        if not link:
+            return None
+        slug = _modrinth_id_from_url(link)
+        if not slug:
+            return None
+        data = mr_get("project/%s" % slug)
+        if not data or not data.get("id"):
+            return None
+        return data["id"], slug
+    except Exception:
+        return None
+
+
+def _same_version_compare(same, compare_dir, local_sha1):
+    if compare_dir:
+        dest, err = mr_download_file(same, compare_dir)
+        if dest:
+            if sha1_of(dest) == local_sha1:
+                return dest
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+        return None
+    files = same.get("files") or []
+    f = next((x for x in files if x.get("primary")), files[0] if files else None)
+    fsha = ((f or {}).get("hashes") or {}).get("sha1") or ""
+    if fsha and fsha.lower() == local_sha1:
+        return True
+    return None
+
+
+def match_to_project(meta, mc_version, loader, jar_path, ignore_fork=False,
+                     src_mc_version=None, compare_dir=None):
+    filter_mc = src_mc_version or mc_version
     jar_sha1 = sha1_of(jar_path)
 
     try:
         ver = mr_lookup_sha1(jar_sha1)
         if ver and ver.get("project_id"):
-            return ver["project_id"], 1.0, "源文件 sha1 与 Modrinth 完全一致"
+            return ver["project_id"], 1.0, "源文件 sha1 与 Modrinth 完全一致", None
     except requests.RequestException:
         pass
 
@@ -340,6 +432,18 @@ def match_to_project(meta, mc_version, loader, jar_path):
             jar_version = (m_used.get("version") or "").strip()
             jar_authors = m_used.get("authors") or []
 
+            if is_wrapper_meta(meta):
+                rep = (meta.get("nested") or [None])[0]
+                rep_ver = (rep or {}).get("version") or ""
+                rep_sha1 = (rep or {}).get("sha1") or ""
+                if rep_ver and rep_sha1:
+                    same = _find_same_version(pid, rep_ver, filter_mc, loader)
+                    if same:
+                        matched = _same_version_compare(same, compare_dir, rep_sha1)
+                        if matched:
+                            return pid, 1.0, ("wrapper 内嵌 jar 同版本号 %s 且文件 sha1 完全一致"
+                                              % rep_ver), (matched if isinstance(matched, str) else None)
+
             members = None
             if best[0] >= ASK_CONF and jar_authors:
                 try:
@@ -349,23 +453,26 @@ def match_to_project(meta, mc_version, loader, jar_path):
             if members:
                 if authors_equal(jar_authors, members):
                     why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
-                    return pid, best[0], why + "（作者校验通过）"
+                    return pid, best[0], why + "（作者校验通过）", None
                 if jar_version:
-                    same = _find_same_version(pid, jar_version, mc_version, loader)
+                    same = _find_same_version(pid, jar_version, filter_mc, loader)
                     if same:
-                        files = same.get("files") or []
-                        f = next((x for x in files if x.get("primary")),
-                                 files[0] if files else None)
-                        fsha = ((f or {}).get("hashes") or {}).get("sha1") or ""
-                        if fsha and fsha.lower() == jar_sha1:
+                        matched = _same_version_compare(same, compare_dir, jar_sha1)
+                        if matched:
                             return pid, 1.0, ("作者不一致，但同版本号 %s 且文件 sha1 完全一致"
-                                              "（原版文件）" % jar_version)
+                                              "（原版文件）" % jar_version), \
+                                (matched if isinstance(matched, str) else None)
+                if ignore_fork:
+                    return pid, 1.0, "作者校验未通过，已按选项忽略（疑似 fork 版，请留意）", None
                 return None, 0.0, ("作者列表与 Modrinth 项目不一致，且同版本号文件校验未通过"
-                                   "（疑似 fork 版模组）")
+                                   "（疑似 fork 版模组）"), None
 
             why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
-            return pid, best[0], why
-    return None, 0.0, "无搜索结果"
+            return pid, best[0], why, None
+    resolved = resolve_via_mcmod(meta)
+    if resolved:
+        return resolved[0], 1.0, "通过 mcmod.cn 定位到 Modrinth 项目（%s）" % resolved[1], None
+    return None, 0.0, "无搜索结果", None
 
 
 class Downloader:

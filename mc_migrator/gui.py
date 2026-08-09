@@ -36,11 +36,14 @@ class MigrateWorker:
         from .core import Logger
         self.params = params
         self.cfg = cfg
-        self.msg_queue = queue.Queue() 
+        self.msg_queue = queue.Queue()
         self._ans_event = threading.Event()
         self._answer = True
+        self._conf_event = threading.Event()
+        self._conf_answer = "skip"
         self.cfg.log = Logger(self.log_sink)
         self.cfg.confirm = self.confirm_sync
+        self.cfg.on_conflicts = self.conflicts_sync
 
     def log_sink(self, msg, level="info"):
         self.msg_queue.put(("log", level, msg))
@@ -59,6 +62,16 @@ class MigrateWorker:
     def set_answer(self, val):
         self._answer = val
         self._ans_event.set()
+
+    def conflicts_sync(self, conflicts):
+        self.msg_queue.put(("conflicts", conflicts))
+        self._conf_event.clear()
+        self._conf_event.wait(timeout=None)
+        return self._conf_answer
+
+    def set_conflict_answer(self, val):
+        self._conf_answer = val
+        self._conf_event.set()
 
     def run(self):
         from .migrator import run_migration
@@ -154,7 +167,7 @@ class MainWindow(QtWidgets.QWidget):
         sw.setContentsMargins(0, 0, 0, 0)
         self.overwrite_radio = QtWidgets.QRadioButton("迁移到新的空服务端")
         self.overwrite_radio.setChecked(True)
-        self.overwrite_inplace_radio = QtWidgets.QRadioButton("直接覆盖当前服务端 mods（只更新 mods，其他不迁移）")
+        self.overwrite_inplace_radio = QtWidgets.QRadioButton("直接覆盖当前服务端 mods(只更新模组到指定游戏版本)")
         self.overwrite_inplace_radio.toggled.connect(self._on_dst_overwrite_changed)
         sw.addWidget(self.overwrite_radio)
         sw.addWidget(self.overwrite_inplace_radio)
@@ -167,7 +180,7 @@ class MainWindow(QtWidgets.QWidget):
         self.mc_combo = QtWidgets.QComboBox()
         self.mc_combo.setEditable(True)
         self.mc_combo.setMinimumWidth(140)
-        self.show_all_chk = QtWidgets.QCheckBox("显示所有版本（含快照）")
+        self.show_all_chk = QtWidgets.QCheckBox("显示所有版本")
         self.mc_status_label = QtWidgets.QLabel("正在拉取版本列表...")
 
         dst_grid.addWidget(QtWidgets.QLabel("目录"), 0, 0)
@@ -201,19 +214,49 @@ class MainWindow(QtWidgets.QWidget):
             ck = QtWidgets.QCheckBox(CHOICE_LABELS[k])
             ck.setChecked(k != "optional")
             self.data_checks[k] = ck
+            if k == "server":
+                continue
             opt.addWidget(ck, 1 + i // 3, i % 3)
         self.proxy_chk = QtWidgets.QCheckBox("使用系统代理")
         self.proxy_chk.setChecked(True)
         self.threads_spin = QtWidgets.QSpinBox()
         self.threads_spin.setRange(1, 16)
         self.threads_spin.setValue(4)
+        self.threads_spin.setMinimumWidth(72)
+        self.threads_spin.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.threads_spin.setToolTip("并发下载线程数")
+        self.analysis_spin = QtWidgets.QSpinBox()
+        self.analysis_spin.setRange(1, 16)
+        self.analysis_spin.setValue(8)
+        self.analysis_spin.setMinimumWidth(72)
+        self.analysis_spin.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.analysis_spin.setToolTip("并发分析线程数")
         self.failures_chk = QtWidgets.QCheckBox("完成后列出匹配失败及开源链接")
         self.failures_chk.setChecked(True)
-        opt.addWidget(self.proxy_chk, 0, 3)
-        opt.addWidget(QtWidgets.QLabel("下载线程"), 1, 3)
-        opt.addWidget(self.threads_spin, 2, 3)
-        opt.addWidget(self.failures_chk, 3, 0, 1, 3)
+        self.ignore_fork_chk = QtWidgets.QCheckBox("高置信度忽略 fork 防护")
+        self.threads_box = QtWidgets.QWidget()
+        tb = QtWidgets.QHBoxLayout(self.threads_box)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.addWidget(QtWidgets.QLabel("下载线程"))
+        tb.addWidget(self.threads_spin)
+        self.analysis_box = QtWidgets.QWidget()
+        ab = QtWidgets.QHBoxLayout(self.analysis_box)
+        ab.setContentsMargins(0, 0, 0, 0)
+        ab.addWidget(QtWidgets.QLabel("分析线程"))
+        ab.addWidget(self.analysis_spin)
+        self.ck_row = QtWidgets.QWidget()
+        ck = QtWidgets.QHBoxLayout(self.ck_row)
+        ck.setContentsMargins(0, 0, 0, 0)
+        ck.addWidget(self.proxy_chk)
+        ck.addWidget(self.ignore_fork_chk)
+        ck.addWidget(self.failures_chk)
+        ck.addWidget(self.data_checks["server"])
+        ck.addStretch(1)
+        opt.addWidget(self.threads_box, 0, 3)
+        opt.addWidget(self.analysis_box, 1, 3)
+        opt.addWidget(self.ck_row, 2, 2, 1, 4)
         opt.setColumnStretch(3, 1)
         root.addWidget(opt_box)
         bar = QtWidgets.QHBoxLayout()
@@ -329,7 +372,7 @@ class MainWindow(QtWidgets.QWidget):
             self.src_version_combo.setEnabled(False)
             self.src_version_combo.addItem("(服务端根目录，mods 直接在根目录)")
             ldr = sniff_server_loader(root)
-            self.src_ver_label.setText("加载器: %s" % (LOADER_LABEL[ldr] if ldr else "未识别（请手动选目标加载器）"))
+            self.src_ver_label.setText("加载器: %s" % (LOADER_LABEL[ldr] if ldr else "未识别（请手动选择加载器）"))
             self._auto_loader_default(ldr)
         else:
             self.src_version_combo.setEnabled(True)
@@ -397,22 +440,18 @@ class MainWindow(QtWidgets.QWidget):
         self._auto_set_mc_version()
 
     def _start_version_fetch(self):
-        self._vf_thread = QtCore.QThread(self)
         self._vf = VersionFetcher()
-        self._vf.moveToThread(self._vf_thread)
-        self._vf_thread.started.connect(self._vf.run)
         self._vf.done.connect(self._on_versions_fetched)
+        self._vf_thread = threading.Thread(target=self._vf.run,
+                                           name="version-fetch", daemon=True)
         self._vf_thread.start()
 
     def _on_versions_fetched(self, releases, all_ids):
         self._mc_releases, self._mc_all = releases, all_ids
-        if self._vf_thread:
-            self._vf_thread.quit()
-            self._vf_thread.wait(2000)
-            self._vf_thread = None
+        self._vf_thread = None
         self._fill_mc_combo()
         self.mc_status_label.setText(
-            "已拉取 %d 个正式版（勾选『显示所有版本』可含快照）" % len(releases)
+            "已拉取 %d 个正式版（勾选『显示所有版本』版本列表中显示快照版本）" % len(releases)
             if releases else "版本列表拉取失败，可手动输入版本号")
         self._auto_set_mc_version()
 
@@ -493,7 +532,7 @@ class MainWindow(QtWidgets.QWidget):
         if not re.match(r"^\d+\.\d+", t_mc):
             QtWidgets.QMessageBox.warning(
                 self, "错误",
-                "目标 MC 版本无效：%s\n请在下方列表选择（C2C 会自动读取目标版本）" % t_mc)
+                "目标 MC 版本无效：%s\n请在下方列表选择" % t_mc)
             return
 
         if self._mode == "s2s" and self._overwrite_mode:
@@ -511,7 +550,9 @@ class MainWindow(QtWidgets.QWidget):
             choices=choices,
             use_system_proxy=self.proxy_chk.isChecked(),
             download_threads=self.threads_spin.value(),
+            analysis_threads=self.analysis_spin.value(),
             print_failures=self.failures_chk.isChecked(),
+            ignore_fork=self.ignore_fork_chk.isChecked(),
         )
         self.stop_event = threading.Event()
         params = {"src_root": mc_root, "src_version": src_version,
@@ -524,8 +565,6 @@ class MainWindow(QtWidgets.QWidget):
         self.worker = MigrateWorker(params, cfg)
         self._worker_thread = threading.Thread(target=self.worker.run,
                                                name="migrate-worker", daemon=True)
-
-        self._log("===== 开始迁移（%s）=====" % ("S2S 服务端→服务端" if self._mode == "s2s" else "C2C 客户端→客户端"))
         self._set_running(True)
         self._last_log_time = time.time()
         self._dumped = False
@@ -538,7 +577,7 @@ class MainWindow(QtWidgets.QWidget):
     def _stop(self):
         if self.stop_event:
             self.stop_event.set()
-        self._log("正在停止（处理完当前项后退出）...")
+        self._log("正在停止...")
 
     def _set_running(self, running):
         self.start_btn.setEnabled(not running)
@@ -573,6 +612,11 @@ class MainWindow(QtWidgets.QWidget):
                 elif kind == "confirm":
                     (prompt,) = payload
                     self._show_confirm_dialog(prompt)
+                elif kind == "conflicts":
+                    (data,) = payload
+                    action = self._show_conflicts_dialog(data)
+                    if self.worker:
+                        self.worker.set_conflict_answer(action)
                 elif kind == "done":
                     (result,) = payload
                     self._poll_timer.stop()
@@ -585,6 +629,31 @@ class MainWindow(QtWidgets.QWidget):
                     return
         except queue.Empty:
             pass
+
+    def _show_conflicts_dialog(self, conflicts):
+        lines = ["发现依赖-冲突冲突："]
+        for item in conflicts[:5]:
+            lines.append("%s：被 %s 依赖；与 %s 冲突" % (
+                item.get("name") or item.get("mod"),
+                "、".join(item.get("dependents", [])[:5]),
+                "、".join(item.get("conflicting", [])[:5])))
+        if len(conflicts) > 5:
+            lines.append("……共 %d 组" % len(conflicts))
+        lines.append("")
+        lines.append("请选择处理方式：")
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("依赖与冲突")
+        box.setText("\n".join(lines))
+        b1 = box.addButton("删除模组及依赖它的模组", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        b2 = box.addButton("删除冲突的模组", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        b3 = box.addButton("忽略", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b1:
+            return "delete_c"
+        if clicked is b2:
+            return "delete_conflicts"
+        return "skip"
 
     def _show_confirm_dialog(self, prompt):
         box = QtWidgets.QMessageBox(
@@ -627,8 +696,6 @@ class MainWindow(QtWidgets.QWidget):
             self._log("  %s -> %s" % (name, fname))
         if report["skipped"]:
             self._log("跳过 %d 个（库/非模组）" % len(report["skipped"]))
-        if report.get("duplicates"):
-            self._log("重复项目合并 %d 个（同一项目只下载一次）" % len(report["duplicates"]))
         if report["manual"]:
             self._log("%d 个模组需要手动处理（详见报告文件）" % len(report["manual"]), "warn")
             for jname, meta, why in report["manual"]:
@@ -676,9 +743,8 @@ class MainWindow(QtWidgets.QWidget):
             if self.stop_event:
                 self.stop_event.set()
             self._worker_thread.join(timeout=5)
-        if self._vf_thread and self._vf_thread.isRunning():
-            self._vf_thread.quit()
-            self._vf_thread.wait(2000)
+        if self._vf_thread and self._vf_thread.is_alive():
+            self._vf_thread.join(timeout=2)
         event.accept()
 
 

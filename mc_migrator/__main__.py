@@ -22,9 +22,13 @@ def parse_args():
     p.add_argument("--target-mc", help="目标 Minecraft 版本，如 1.20.1（省略时客户端自动读取/清单选择）")
     p.add_argument("--yes", action="store_true", help="自动确认所有询问")
     p.add_argument("--threads", type=int, default=4, help="并发下载线程数 (1-16，默认 4)")
+    p.add_argument("--analysis-threads", type=int, default=8,
+                   help="并发分析线程数 (1-16，默认 8；解包/匹配/挑版本并行)")
     p.add_argument("--no-system-proxy", action="store_true", help="不使用系统代理（直连）")
     p.add_argument("--no-failures", action="store_true",
                    help="不打印匹配失败清单（默认完成后打印并附开源链接）")
+    p.add_argument("--ignore-fork", action="store_true",
+                   help="高置信度忽略 fork 防护直接下载（日志提示，不进手动清单）")
     p.add_argument("--skip-deps", action="store_true", help="不自动安装依赖")
     p.add_argument("--skip-data", action="store_true", help="不迁移任何数据目录")
     p.add_argument("--migrate", help="仅迁移指定数据类别，逗号分隔: " + ",".join(CHOICE_KEYS))

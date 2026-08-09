@@ -12,7 +12,7 @@ build/
 dist/
 *.spec
 
-# 迁移报告 / 运行日志（运行生成）
+# 迁移报告 / 运行日志
 迁移报告_*.txt
 迁移日志.txt
 thread_dump.txt

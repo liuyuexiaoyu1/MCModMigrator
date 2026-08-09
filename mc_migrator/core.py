@@ -39,11 +39,11 @@ SERVER_FILES = [
 CHOICE_KEYS = ["config", "options", "saves", "stray", "optional", "server"]
 CHOICE_LABELS = {
     "config": "config 目录",
-    "options": "options.txt",
-    "saves": "saves / world 存档",
+    "options": "游戏设置",
+    "saves": "存档",
     "stray": "模组生成的杂项目录",
-    "optional": "资源包 / 光影 / servers.dat",
-    "server": "服务端文件 (server.properties 等)",
+    "optional": "资源包 / 光影",
+    "server": "服务端配置文件",
 }
 
 HIGH_CONF = 0.85

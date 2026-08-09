@@ -25,13 +25,16 @@ from .modrinth import (Downloader, authors_equal, collect_deps,
                        configure_http, lookup_project_links,
                        match_to_project, mr_download_file, mr_get,
                        mr_lookup_sha1, mr_search, mr_versions,
-                       parse_retry_after, pick_version, primary_filename,
-                       project_members, score_hit, ver_compatible)
+                       parse_retry_after, pick_version, pick_version_in_range,
+                       primary_filename, project_members, resolve_via_mcmod,
+                       score_hit, ver_compatible)
 from .versions import base_mc_version, detect_target_mc, fetch_mc_versions
+from .graph import DEFAULT_DEPS, ModGraph, version_satisfies
 from .migrator import (RunConfig, copy_saves_merge, copy_tree_missing,
                        copy_tree_overwrite, dir_size, find_stray,
                        migrate_game_data, migrate_mods, print_failure_links,
-                       print_summary, run_migration, write_report_file)
+                       print_summary, resolve_conflicts, run_migration,
+                       write_report_file)
 from .cli import (ask, ask_path, ask_yes_no, choose_loader, cli_pick_mc_version,
                   pick_from_list, run_cli)
 from .gui import HAVE_QT, MainWindow, MigrateWorker, VersionFetcher, run_gui

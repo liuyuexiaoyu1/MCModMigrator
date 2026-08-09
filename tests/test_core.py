@@ -7,7 +7,7 @@ import time
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import mod_migrator as mm  # noqa: E402
+import mc_migrator as mm  # noqa: E402
 
 PASS = 0
 
@@ -116,6 +116,15 @@ try:
         fh.write(b"this is not a zip file")
     ok(mm.parse_mod_jar(bad2) is None, "损坏 jar 返回 None 不抛异常")
 
+    # 容错 JSON：描述里含未转义换行的 fabric.mod.json（EuphoriaPatcher 同款）也能解析
+    ej = os.path.join(tmp, "escaped_mod.jar")
+    make_jar(ej, {"fabric.mod.json": '{\n\t"id": "euphoria_patcher",\n\t"name": "Euphoria Patcher",\n'
+                                     '\t"description": "line1\nline2",\n\t"version": "1.6.5",\n'
+                                     '\t"entrypoints": {"main": ["mc.ep.Main"]}\n}'})
+    m = mm.parse_mod_jar(ej)
+    ok(m and m["id"] == "euphoria_patcher" and m["name"] == "Euphoria Patcher",
+       "容错解析未转义换行: %s" % (m and m["id"]))
+
     print("== 2. 置信度评分 ==")
     meta = {"id": "sodium-extra", "name": "Sodium Extra", "version": "0.5.4"}
     s, why = mm.score_hit(meta, {"slug": "sodium-extra", "title": "Sodium Extra", "id": "AANobbMI"})
@@ -149,6 +158,14 @@ try:
     open(os.path.join(iso_root, "journeymap.txt"), "w").close()
     d2, f2 = mm.find_stray(iso_root)
     ok(f2 == ["journeymap.txt"], "版本 json 不参与杂项迁移: %s" % f2)
+    # 版本隔离根目录下的核心 jar 与启动器 json（<目录名>.jar/.json）不迁移
+    iso2 = os.path.join(tmp, "1.20.1-fabric")
+    os.makedirs(iso2)
+    open(os.path.join(iso2, "1.20.1-fabric.jar"), "w").close()
+    open(os.path.join(iso2, "1.20.1-fabric.json"), "w").close()
+    open(os.path.join(iso2, "waystones.json"), "w").close()
+    d3, f3 = mm.find_stray(iso2)
+    ok(f3 == ["waystones.json"], "核心 jar 与启动器 json 不迁移: %s" % f3)
 
     print("== 4. 客户端目录识别（版本隔离）==")
     mc = os.path.join(tmp, "minecraft")
@@ -207,10 +224,11 @@ try:
     m = mm.parse_mod_jar(w)
     ok(m and m["id"] == "gca_wrapper" and m["name"] == "gugle-carpet-addition-Wrapper",
        "外层 wrapper 元数据: %s" % (m["id"] if m else None))
-    ok(len(m.get("nested", [])) == 2 and m["nested"][0]["id"] == "gca",
-       "提取内嵌真实模组 jar 元数据（去重后）: %s" % [x["id"] for x in m.get("nested", [])])
+    ok(len(m.get("nested", [])) == 1 and m["nested"][0]["id"] == "gca",
+       "wrapper 只保留一个代表内嵌 jar: %s" % [x["id"] for x in m.get("nested", [])])
     ok(m["nested"][0]["name"] == "gugle-carpet-addition", "内嵌 name 为真实模组名")
-    ok(mm.is_wrapper_meta(m), "识别为 wrapper 模组")
+    ok(m["nested"][0].get("sha1"), "代表内嵌 jar 带字节 sha1")
+    ok(mm.is_wrapper_meta(m), "结构性识别为 wrapper 模组")
     ok(mm.wrapper_base_id(m) == "gca", "wrapper 基底 id: gca")
     ok(not mm.is_wrapper_meta({"id": "sodium", "name": "Sodium"}), "普通模组不是 wrapper")
     # 纯 wrapper
@@ -360,40 +378,186 @@ try:
     _mr.project_members = fake_members
     _mr._versions_cache.clear()
     try:
-        pid, conf, why = _mr.match_to_project(
+        pid, conf, why, _mf = _mr.match_to_project(
             {"id": "somemod", "name": "SomeMod", "version": "9.9.9", "authors": ["Alice"]},
             "1.20.1", "fabric", vmatch_jar)
         ok(pid == "P1" and "作者校验通过" in why,
            "作者一致 → 直接通过（无需同版本号）: %s" % why)
         members_now = ["Alice", "Bob"]
         _mr._versions_cache.clear()
-        pid, conf, why = _mr.match_to_project(
+        pid, conf, why, _mf = _mr.match_to_project(
             {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["Alice"]},
             "1.20.1", "fabric", vmatch_jar)
         ok(pid == "P1" and conf == 1.0 and "原版文件" in why,
            "作者不一致但同版本号且文件 sha1 一致 → 通过: %s" % why)
-        pid, conf, why = _mr.match_to_project(
+        pid, conf, why, _mf = _mr.match_to_project(
             {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["EvilForker"]},
             "1.20.1", "fabric", fork_jar)
         ok(pid is None and "疑似 fork" in why,
            "作者不一致且文件 sha1 不一致 → 拒绝: %s" % why)
-        pid, conf, why = _mr.match_to_project(
+        pid, conf, why, _mf = _mr.match_to_project(
             {"id": "somemod", "name": "SomeMod", "version": "9.9.9", "authors": ["EvilForker"]},
             "1.20.1", "fabric", vmatch_jar)
         ok(pid is None and "疑似 fork" in why, "作者不一致且无同版本号 → 拒绝")
         nover_jar = os.path.join(tmp, "vnover.jar")
         make_jar(nover_jar, {"fabric.mod.json": json.dumps(
             {"id": "somemod", "name": "SomeMod", "authors": ["EvilForker"]})})
-        pid, conf, why = _mr.match_to_project(
+        pid, conf, why, _mf = _mr.match_to_project(
             {"id": "somemod", "name": "SomeMod", "authors": ["EvilForker"]},
             "1.20.1", "fabric", nover_jar)
         ok(pid is None and "疑似 fork" in why, "作者不一致且无版本号 → 拒绝（不漏过）")
-        pid, conf, why = _mr.match_to_project(
+        pid, conf, why, _mf = _mr.match_to_project(
             {"id": "somemod", "name": "SomeMod", "version": "9.9.9", "authors": []},
             "1.20.1", "fabric", vmatch_jar)
         ok(pid == "P1" and "slug" in why, "无作者信息 → 按置信度通过: %s" % why)
+        # ⑥ wrapper 专有：代表内嵌 jar 同版本号 + sha1 一致 → 直接 1.0
+        wjar = os.path.join(tmp, "vwrapper.jar")
+        make_jar(wjar, {"fabric.mod.json": json.dumps(
+            {"id": "wmod_wrapper", "name": "WMod Wrapper"})})
+        wrapper_ok = {"id": "wmod_wrapper", "name": "WMod Wrapper", "version": "9.9.9",
+                      "authors": [], "wrapper": True,
+                      "nested": [{"id": "wmod", "name": "WMod", "version": "1.4.0",
+                                  "sha1": vmatch_sha1, "authors": []}]}
+        _mr._versions_cache.clear()
+        pid, conf, why, _mf = _mr.match_to_project(wrapper_ok, "1.20.1", "fabric", wjar)
+        ok(pid == "P1" and conf == 1.0 and "wrapper 内嵌 jar" in why,
+           "wrapper 代表 jar 同版本号+sha1 一致 → 1.0: %s" % why)
+        # ⑦ wrapper sha1 不一致 → 落到作者门兜底（无作者 → 按置信度通过）
+        wrapper_bad = {"id": "wmod_wrapper", "name": "WMod Wrapper", "version": "9.9.9",
+                       "authors": [], "wrapper": True,
+                       "nested": [{"id": "wmod", "name": "WMod", "version": "1.4.0",
+                                   "sha1": "Y" * 40, "authors": []}]}
+        pid, conf, why, _mf = _mr.match_to_project(wrapper_bad, "1.20.1", "fabric", wjar)
+        ok(pid == "P1", "wrapper sha1 不一致 → 兜底通过: %s" % why)
+        # ⑧ ignore_fork=True：fork 拒绝变为直接下载（日志提示）
+        pid, conf, why, _mf = _mr.match_to_project(
+            {"id": "somemod", "name": "SomeMod", "version": "1.4.0", "authors": ["EvilForker"]},
+            "1.20.1", "fabric", fork_jar, ignore_fork=True)
+        ok(pid == "P1" and conf == 1.0 and "已按选项忽略" in why,
+           "ignore_fork=True → fork 不拒绝，直接下载并提示: %s" % why)
     finally:
         _mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.project_members = _saved
+
+    print("== 11.8 依赖/冲突解析 ==")
+    rel = os.path.join(tmp, "relations.jar")
+    make_jar(rel, {"fabric.mod.json": json.dumps({
+        "id": "amod", "name": "AMod", "version": "1.0",
+        "depends": {"bmod": ">=1.0", "minecraft": "1.20.1", "fabricloader": "*"},
+        "conflicts": {"cmod": "<2.0"}})})
+    m = mm.parse_mod_jar(rel)
+    ok(("bmod", ">=1.0") in m["deps"] and ("minecraft", "1.20.1") in m["deps"],
+       "fabric depends 解析: %s" % m["deps"])
+    ok(("cmod", "<2.0") in m["conflicts"], "fabric conflicts 解析: %s" % m["conflicts"])
+    toml_rel = os.path.join(tmp, "toml_rel.jar")
+    make_jar(toml_rel, {"META-INF/mods.toml":
+                        'modLoader="javafml"\n[[mods]]\nmodId="xmod"\ndisplayName="XMod"\n'
+                        '[[dependencies.xmod]]\nmodId="ymod"\nmandatory=true\nversionRange="[1.0,2.0)"\n'
+                        '[[dependencies.xmod]]\nmodId="zmod"\nmandatory=false\n'})
+    m = mm.parse_mod_jar(toml_rel)
+    ok(("ymod", "[1.0,2.0)") in m["deps"] and ("zmod", "*") not in m["deps"],
+       "toml 依赖解析（mandatory 过滤）: %s" % m["deps"])
+
+    print("== 11.9 版本约束匹配 ==")
+    ok(mm.version_satisfies("1.2.3", ">=1.0"), ">= 满足")
+    ok(mm.version_satisfies("1.0.0", "1.0.x"), "x 通配符")
+    ok(not mm.version_satisfies("1.1.0", "1.0.x"), "x 通配符不满足")
+    ok(mm.version_satisfies("2.5", "<3.0"), "< 满足")
+    ok(mm.version_satisfies("1.0", "*"), "* 全通过")
+    ok(not mm.version_satisfies("0.9", ">=1.0"), ">= 不满足")
+    ok(mm.version_satisfies("1.20.1", "1.20.1"), "精确相等")
+    ok(mm.version_satisfies("1.5", "[1.0,2.0)"), "Forge 区间 [1.0,2.0) 满足")
+    ok(not mm.version_satisfies("2.0", "[1.0,2.0)"), "Forge 区间右开不满足")
+
+    print("== 11.10 依赖/冲突图 ==")
+    g = mm.ModGraph()
+    g.add_mod("amod", "AMod", "1.0", "a.jar", "PA", [("bmod", ">=1.0"), ("minecraft", "*")], [])
+    g.add_mod("bmod", "BMod", "1.5", "b.jar", "PB", [], [])
+    g.add_mod("cmod", "CMod", "2.0", "c.jar", "PC", [], [("bmod", "*")])
+    ok(g.dependents.get("bmod") == {"amod"}, "bmod 被 amod 依赖")
+    ok(g.conflicting.get("bmod") == {"cmod"}, "bmod 被 cmod 冲突")
+    rep = g.conflict_report()
+    ok(len(rep) == 1 and rep[0]["mod"] == "bmod" and rep[0]["dependents"] == ["amod"]
+       and rep[0]["conflicting"] == ["cmod"], "冲突报告: %s" % rep)
+    g2 = mm.ModGraph()
+    g2.add_mod("amod", "AMod", "1.0", "a.jar", "PA", [("bmod", ">=2.0")], [])
+    g2.add_mod("bmod", "BMod", "1.5", "b.jar", "PB", [], [])
+    mis = g2.mismatches()
+    ok(len(mis) == 1 and mis[0][:2] == ("amod", "bmod"), "版本不匹配记录: %s" % mis)
+    g3 = mm.ModGraph()
+    g3.add_mod("amod", "AMod", "1.0", "a.jar", "PA", [("minecraft", "*"), ("fabricloader", "*")], [])
+    ok(not g3.dep_reqs.get("amod"), "默认依赖被排除")
+
+    print("== 11.10.5 冲突处理动作 ==")
+    import mc_migrator.migrator as _mig
+    ddir = os.path.join(tmp, "conf_del")
+    os.makedirs(ddir)
+    for fn in ("a.jar", "b.jar", "c.jar"):
+        open(os.path.join(ddir, fn), "w").write("x")
+
+    class _Cfg:
+        def __init__(self, action):
+            self.action = action
+            self.log = mm.Logger(lambda m, l="info": None)
+
+        def on_conflicts(self, conflicts):
+            return self.action
+
+    def build_graph():
+        for fn in ("a.jar", "b.jar", "c.jar"):
+            open(os.path.join(ddir, fn), "w").write("x")
+        g = mm.ModGraph()
+        g.add_mod("amod", "AMod", "1.0", os.path.join(ddir, "a.jar"), "PA", [("bmod", "*")], [])
+        g.add_mod("bmod", "BMod", "1.5", os.path.join(ddir, "b.jar"), "PB", [], [])
+        g.add_mod("cmod", "CMod", "2.0", os.path.join(ddir, "c.jar"), "PC", [], [("bmod", "*")])
+        return g
+
+    g4 = build_graph()
+    removed = _mig.resolve_conflicts(g4, _Cfg("delete_c"))
+    ok(sorted(removed) == ["a.jar", "b.jar"]
+       and not os.path.exists(os.path.join(ddir, "b.jar"))
+       and os.path.exists(os.path.join(ddir, "c.jar")),
+       "delete_c 删除模组及依赖它的模组: %s" % removed)
+    g5 = build_graph()
+    removed = _mig.resolve_conflicts(g5, _Cfg("delete_conflicts"))
+    ok(sorted(removed) == ["c.jar"] and os.path.exists(os.path.join(ddir, "b.jar")),
+       "delete_conflicts 只删冲突模组: %s" % removed)
+    g6 = build_graph()
+    removed = _mig.resolve_conflicts(g6, _Cfg("skip"))
+    ok(removed == [] and os.path.exists(os.path.join(ddir, "a.jar")), "skip 不删除")
+
+    print("== 11.11 带版本约束的版本挑选 ==")
+    import mc_migrator.modrinth as _mr2
+    _orig_v2 = _mr2.mr_versions
+    _mr2.mr_versions = lambda pid, mc=None, loader=None: [
+        {"id": "v3", "version_number": "2.0.0", "date_published": "2026-03-01",
+         "game_versions": ["1.20.1"], "loaders": ["fabric"]},
+        {"id": "v2", "version_number": "1.5.0", "date_published": "2026-02-01",
+         "game_versions": ["1.20.1"], "loaders": ["fabric"]},
+        {"id": "v1", "version_number": "1.0.0", "date_published": "2026-01-01",
+         "game_versions": ["1.20.1"], "loaders": ["fabric"]},
+    ]
+    try:
+        v = _mr2.pick_version_in_range("P", "1.20.1", "fabric", [">=2.0"])
+        ok(v and v["version_number"] == "2.0.0", "范围 >=2.0 选 2.0.0")
+        v = _mr2.pick_version_in_range("P", "1.20.1", "fabric", [">=1.0", "<2.0"])
+        ok(v and v["version_number"] == "1.5.0", "范围 [>=1.0,<2.0) 选 1.5.0")
+        v = _mr2.pick_version_in_range("P", "1.20.1", "fabric", [">=3.0"])
+        ok(v is None, "无满足范围的版本 → None")
+    finally:
+        _mr2.mr_versions = _orig_v2
+
+    print("== 11.12 mcmod 辅助解析 ==")
+    import base64
+    import mc_migrator.modrinth as _mr3
+    ok(_mr3._modrinth_id_from_url("https://modrinth.com/mod/sodium") == "sodium",
+       "modrinth /mod/ 链接提取 slug")
+    ok(_mr3._modrinth_id_from_url("https://modrinth.com/project/AANobbMI") == "AANobbMI",
+       "modrinth /project/ 链接提取 id")
+    ok(_mr3._modrinth_id_from_url("https://modrinth.com/mod/sodium?x=1") == "sodium",
+       "带查询参数仍可提取")
+    ok(_mr3._modrinth_id_from_url("") is None, "空链接返回 None")
+    ok(base64.b64decode("aHR0cHM6Ly9tb2RyaW50aC5jb20vbW9kL3NvZGl1bQ==").decode()
+       == "https://modrinth.com/mod/sodium", "mcmod 跳转 base64 解码")
 
     print("== 12. 版本挑选：无适配目标版本绝不下载 ==")
     import mc_migrator.modrinth as _mr

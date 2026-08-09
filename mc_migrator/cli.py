@@ -226,12 +226,29 @@ def run_cli(args):
                 label += "（资源包/光影/服务器列表）"
             choices[k] = ask_yes_no("是否迁移 %s？" % label, default=(k != "optional"))
 
+    def on_conflicts(conflicts):
+        if args.yes:
+            return "skip"
+        for item in conflicts:
+            print("模组 %s：被 %s 依赖；与 %s 冲突" % (
+                item.get("name") or item.get("mod"),
+                "、".join(item.get("dependents", [])),
+                "、".join(item.get("conflicting", []))))
+        print("1) 删除模组及依赖它的模组  2) 删除冲突的模组  3) 忽略")
+        while True:
+            raw = input("请选择 (1/2/3): ").strip()
+            if raw in ("1", "2", "3"):
+                return {"1": "delete_c", "2": "delete_conflicts", "3": "skip"}[raw]
+
     cfg = RunConfig(auto_yes=args.yes, skip_deps=args.skip_deps,
                     choices=choices,
                     use_system_proxy=not args.no_system_proxy,
                     download_threads=args.threads,
+                    analysis_threads=args.analysis_threads,
                     print_failures=not args.no_failures,
+                    ignore_fork=args.ignore_fork,
                     log=log, confirm=confirm)
+    cfg.on_conflicts = on_conflicts
     params = {"src_root": mc_root, "src_version": src_version,
               "target_root": t_root, "target_version": t_version,
               "src_force_isolated": src_force_isolated,

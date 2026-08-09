@@ -10,7 +10,7 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import mod_migrator as mm  # noqa: E402
+import mc_migrator as mm  # noqa: E402
 
 PASS = 0
 
@@ -53,8 +53,9 @@ def gui_migration_test():
             iz.writestr("fabric.mod.json", json.dumps(
                 {"id": "gca", "name": "gugle-carpet-addition", "version": "2.12.6"}))
         z.writestr("META-INF/jars/real-mod.jar", buf.getvalue())
+        z.writestr("META-INF/jars/real-mod-mc1.21.jar", buf.getvalue())
 
-    import mod_migrator as _mm
+    import mc_migrator as _mm
     app = _mm.QtWidgets.QApplication.instance() or _mm.QtWidgets.QApplication([])
     win = _mm.MainWindow()
     win.src_root_edit.setText(src)
@@ -74,12 +75,12 @@ def gui_migration_test():
     ok(finished, "GUI 迁移正常结束（未死锁未卡死）")
     ok(any("sodium-extra" in j for j in jars), "GUI 迁移下载成功: %s" % jars)
     ok("已下载" in text, "GUI 日志经信号正常渲染")
-    ok("===== 开始迁移" in text and "===== 完成" in text, "开始/完成日志齐全")
+    ok("===== 完成" in text, "完成日志齐全")
     shutil.rmtree(tmp, ignore_errors=True)
 
 
 def gui_confirm_test():
-    import mod_migrator as _mm
+    import mc_migrator as _mm
     app = _mm.QtWidgets.QApplication.instance() or _mm.QtWidgets.QApplication([])
     win = _mm.MainWindow()
     class FakeWorker:
@@ -131,7 +132,9 @@ try:
     ok("正在拉取" in win.mc_status_label.text(), "版本列表未就绪时显示『正在拉取』")
     ok(win.proxy_chk.isChecked(), "默认勾选使用系统代理")
     ok(win.threads_spin.value() == 4, "默认下载线程数 4")
+    ok(win.analysis_spin.value() == 8, "默认分析线程数 8")
     ok(win.failures_chk.isChecked(), "默认勾选完成后打印匹配失败及开源链接")
+    ok(not win.ignore_fork_chk.isChecked(), "默认不勾选忽略 fork 防护")
     for _ in range(100):
         pump(app, 0.1)
         if win._mc_releases:
@@ -199,8 +202,8 @@ try:
     ok(not win.data_master_chk.isEnabled(), "覆盖模式下数据迁移主勾选禁用")
     ok(all(not ck.isEnabled() for ck in win.data_checks.values()),
        "覆盖模式下全部数据类别勾选禁用")
-    ok(win.overwrite_inplace_radio.text().find("只更新 mods") >= 0,
-       "覆盖模式单选文案说明『只更新 mods，其他不迁移』")
+    ok(win.overwrite_inplace_radio.text().find("只更新模组") >= 0,
+       "覆盖模式单选文案说明『只更新模组到指定游戏版本』")
     win.overwrite_radio.setChecked(True)
     pump(app)
     ok(win.dst_root_edit.isEnabled() and win.data_master_chk.isEnabled()

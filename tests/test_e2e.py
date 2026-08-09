@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import mod_migrator as mm  # noqa: E402
+import mc_migrator as mm  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -39,6 +39,7 @@ def make_client(mc_root, version, loader_marker, mods=None, extra_dirs=None, ext
                     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as iz:
                         iz.writestr("fabric.mod.json", json.dumps(rest[0]))
                     z.writestr("META-INF/jars/real-mod.jar", buf.getvalue())
+                    z.writestr("META-INF/jars/real-mod-mc1.21.jar", buf.getvalue())
     for d in extra_dirs or []:
         os.makedirs(os.path.join(vdir, d), exist_ok=True)
         with open(os.path.join(vdir, d, "data.txt"), "w") as f:
@@ -69,8 +70,8 @@ def main():
                      {"id": "gca_wrapper", "name": "gugle-carpet-addition-Wrapper", "version": "1.0.6"},
                      {"id": "gca", "name": "gugle-carpet-addition", "version": "2.12.6"}),
                     ("my_private_mod.jar", {"id": "my_private_mod", "name": "My Private Mod", "version": "0.0.1"}),
-                    # 与 sodium-extra 的依赖 sodium 同项目：应归入“重复项目合并”，不进“跳过”
                     ("sodium_fake.jar", {"id": "sodium", "name": "Sodium", "version": "0.0.1"}),
+                    ("appleskin_cn.jar", {"id": "appleskin_cn", "name": "苹果皮", "version": "0.0.1"}),
                 ],
                 extra_dirs=["config", "journeymap"],
                 extra_files=["options.txt"])
@@ -152,6 +153,9 @@ def main():
     check("重复项目合并 1 个" in out and "sodium_fake.jar" in out,
           "重复项目独立统计，不进『跳过』清单")
     check("合并重复" in out, "重复项日志标记为『合并重复』而非跳过")
+    check("依赖图统计" in out, "下载时即时构建依赖图并统计")
+    check("通过 mcmod.cn" in out and any("appleskin" in j.lower() for j in jars),
+          "Modrinth 搜不到时经 mcmod.cn 兜底下载 AppleSkin")
     check(os.path.exists(os.path.join(dst_v, "config", "data.txt")), "config 已迁移")
     check(os.path.exists(os.path.join(dst_v, "options.txt")), "options.txt 已迁移")
     check(os.path.exists(os.path.join(dst_v, "saves", "world1", "level.dat")), "saves 新世界已复制")
@@ -295,9 +299,11 @@ def test_fork_detection(tmp):
     open(os.path.join(src_mc, "versions", "1.20.1-fabric", "1.20.1-fabric.json"), "w",
          encoding="utf-8").write(json.dumps({"libraries": [{"name": "net.fabricmc:fabric-loader:0.15.10"}]}))
     dst_mc = os.path.join(tmp, "fork_dst")
-    os.makedirs(os.path.join(dst_mc, "versions", "1.20.1-fabric", "mods"), exist_ok=True)
-    open(os.path.join(dst_mc, "versions", "1.20.1-fabric", "1.20.1-fabric.json"), "w",
-         encoding="utf-8").write(json.dumps({"libraries": [{"name": "net.fabricmc:fabric-loader:0.15.10"}]}))
+    dst_mc2 = os.path.join(tmp, "fork_dst2")
+    for dmc in (dst_mc, dst_mc2):
+        os.makedirs(os.path.join(dmc, "versions", "1.20.1-fabric", "mods"), exist_ok=True)
+        open(os.path.join(dmc, "versions", "1.20.1-fabric", "1.20.1-fabric.json"), "w",
+             encoding="utf-8").write(json.dumps({"libraries": [{"name": "net.fabricmc:fabric-loader:0.15.10"}]}))
 
     try:
         import requests
@@ -334,6 +340,19 @@ def test_fork_detection(tmp):
     check("疑似 fork 版模组" in out, "fork 版进手动清单并提示原因")
     check("开源仓库" in out and "github.com" in out,
           "完成后打印匹配失败清单并附开源链接")
+    check("手动处理" in out, "fork 版进入手动清单")
+    # 开启 --ignore-fork 后：fork 版也直接下载，仅日志提示
+    res2 = run_cli(["--src-root", src_mc, "--src-version", "1.20.1-fabric",
+                    "--target-root", dst_mc2, "--target-version", "1.20.1-fabric",
+                    "--target-loader", "fabric", "--target-mc", "1.20.1",
+                    "--yes", "--skip-data", "--ignore-fork"])
+    out2 = (res2.stdout + "\n" + res2.stderr).strip()
+    jars2 = os.listdir(os.path.join(dst_mc2, "versions", "1.20.1-fabric", "mods"))
+    check(res2.returncode == 0, "ignore-fork CLI 正常退出")
+    check(any("sodium" in j for j in jars2), "--ignore-fork 后 fork 版直接下载")
+    check("已按选项忽略" in out2, "忽略 fork 时日志提示")
+    check("手动处理" not in out2, "开启忽略后不因 fork 进手动清单")
+
     reports = [f for f in os.listdir(ROOT) if f.startswith("迁移报告_")]
     for r in reports:
         os.remove(os.path.join(ROOT, r))
