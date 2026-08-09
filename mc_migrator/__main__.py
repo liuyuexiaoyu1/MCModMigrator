@@ -12,28 +12,29 @@ from mc_migrator.cli import run_cli
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="MC 模组迁移 / 更新工具（默认图形界面）")
+    p = argparse.ArgumentParser(description="MCModMigrator")
     p.add_argument("--cli", action="store_true", help="使用命令行模式")
     p.add_argument("--src-root", help="源 .minecraft 根目录或服务端根目录")
-    p.add_argument("--src-version", help="源客户端版本名（C2C）")
+    p.add_argument("--src-version", help="源客户端版本名")
     p.add_argument("--target-root", help="目标 .minecraft 根目录或服务端根目录")
-    p.add_argument("--target-version", default="", help="目标客户端版本名（留空=mods 放根目录）")
+    p.add_argument("--target-version", default="", help="目标客户端版本名（留空=非版本隔离）")
     p.add_argument("--target-loader", choices=LOADERS, help="目标加载器")
-    p.add_argument("--target-mc", help="目标 Minecraft 版本，如 1.20.1（省略时客户端自动读取/清单选择）")
+    p.add_argument("--target-mc", help="目标 Minecraft 版本")
     p.add_argument("--yes", action="store_true", help="自动确认所有询问")
     p.add_argument("--threads", type=int, default=4, help="并发下载线程数 (1-16，默认 4)")
     p.add_argument("--analysis-threads", type=int, default=8,
-                   help="并发分析线程数 (1-16，默认 8；解包/匹配/挑版本并行)")
-    p.add_argument("--no-system-proxy", action="store_true", help="不使用系统代理（直连）")
+                   help="并发分析线程数 (1-16，默认 8)")
+    p.add_argument("--no-system-proxy", action="store_true", help="不使用系统代理")
     p.add_argument("--no-failures", action="store_true",
-                   help="不打印匹配失败清单（默认完成后打印并附开源链接）")
+                   help="不打印匹配失败清单")
     p.add_argument("--ignore-fork", action="store_true",
-                   help="高置信度忽略 fork 防护直接下载（日志提示，不进手动清单）")
+                   help="高置信度忽略 fork 防护直接下载")
     p.add_argument("--skip-deps", action="store_true", help="不自动安装依赖")
     p.add_argument("--skip-data", action="store_true", help="不迁移任何数据目录")
+    p.add_argument("--no-mods", action="store_true", help="不迁移模组（只迁移数据）")
     p.add_argument("--migrate", help="仅迁移指定数据类别，逗号分隔: " + ",".join(CHOICE_KEYS))
     p.add_argument("--overwrite", action="store_true",
-                   help="服务端覆盖模式：直接在源服务端目录更新 mods（需手动指定/选择 --target-mc）")
+                   help="服务端覆盖模式：直接在源服务端目录更新 mods")
     return p.parse_args()
 
 

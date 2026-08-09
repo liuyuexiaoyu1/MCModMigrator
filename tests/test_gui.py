@@ -130,6 +130,8 @@ try:
     ok(not win.data_checks["options"].isHidden(), "C2C 下显示 options.txt 类别")
 
     ok("正在拉取" in win.mc_status_label.text(), "版本列表未就绪时显示『正在拉取』")
+    ok(win.mods_chk.isChecked() and not hasattr(win, "data_master_chk"),
+       "总开关改为『迁移mod』且默认勾选")
     ok(win.proxy_chk.isChecked(), "默认勾选使用系统代理")
     ok(win.threads_spin.value() == 4, "默认下载线程数 4")
     ok(win.analysis_spin.value() == 8, "默认分析线程数 8")
@@ -166,8 +168,15 @@ try:
     win.src_root_edit.setText(os.path.join(fake, "versions", "1.20.1-fabric"))
     pump(app)
     ok(win.src_root_edit.text() == fake, "源直选版本隔离目录后回填 .minecraft 根目录")
-    ok(win._src_versions and win._src_versions[win.src_version_combo.currentIndex()][0] == "1.20.1-fabric",
+    ok(win._src_versions and win.src_version_combo.currentIndex() == 1
+       and win._src_versions[win.src_version_combo.currentIndex() - 1][0] == "1.20.1-fabric",
        "源自动选中版本 1.20.1-fabric")
+    win.src_version_combo.setCurrentIndex(0)
+    pump(app)
+    ok(win.src_version_combo.currentIndex() == 0 and win.src_version_combo.itemText(0) == "非版本隔离",
+       "源下拉第一项为『非版本隔离』")
+    win.src_version_combo.setCurrentIndex(1)
+    pump(app)
     win.dst_root_edit.setText(os.path.join(fake, "versions", "1.20.1-fabric"))
     pump(app)
     ok(win.dst_root_edit.text() == fake, "目标直选版本隔离目录后回填根目录")
@@ -199,14 +208,14 @@ try:
     pump(app)
     ok(win._overwrite_mode, "覆盖模式已开启")
     ok(not win.dst_root_edit.isEnabled(), "覆盖模式下目标目录禁用")
-    ok(not win.data_master_chk.isEnabled(), "覆盖模式下数据迁移主勾选禁用")
     ok(all(not ck.isEnabled() for ck in win.data_checks.values()),
        "覆盖模式下全部数据类别勾选禁用")
+    ok(win.mods_chk.isEnabled(), "覆盖模式下『迁移mod』仍可用")
     ok(win.overwrite_inplace_radio.text().find("只更新模组") >= 0,
        "覆盖模式单选文案说明『只更新模组到指定游戏版本』")
     win.overwrite_radio.setChecked(True)
     pump(app)
-    ok(win.dst_root_edit.isEnabled() and win.data_master_chk.isEnabled()
+    ok(win.dst_root_edit.isEnabled()
        and all(ck.isEnabled() for ck in win.data_checks.values()), "切回迁移模式恢复正常")
 
     win.overwrite_inplace_radio.setChecked(True)
@@ -216,8 +225,7 @@ try:
     ok(win._mode == "c2c" and not win._overwrite_mode, "覆盖模式切回 C2C 后覆盖标志清除")
     ok(win.dst_root_edit.isEnabled() and win.dst_browse_btn.isEnabled(),
        "切回 C2C 后目标路径可用")
-    ok(win.data_master_chk.isEnabled()
-       and all(ck.isEnabled() for ck in win.data_checks.values()),
+    ok(all(ck.isEnabled() for ck in win.data_checks.values()),
        "切回 C2C 后数据迁移勾选恢复可用")
 
     win.c2c_radio.setChecked(True)

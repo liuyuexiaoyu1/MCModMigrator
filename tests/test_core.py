@@ -559,6 +559,40 @@ try:
     ok(base64.b64decode("aHR0cHM6Ly9tb2RyaW50aC5jb20vbW9kL3NvZGl1bQ==").decode()
        == "https://modrinth.com/mod/sodium", "mcmod 跳转 base64 解码")
 
+    print("== 11.13 大目录延迟迁移（超过阈值留到最后询问）==")
+    import mc_migrator.migrator as _mig2
+    _orig_thr = _mig2.BIG_FOLDER_THRESHOLD
+    _mig2.BIG_FOLDER_THRESHOLD = 10
+    sbig = os.path.join(tmp, "big_src")
+    dbig = os.path.join(tmp, "big_dst")
+    dbig2 = os.path.join(tmp, "big_dst2")
+    os.makedirs(os.path.join(sbig, "saves", "world_big"))
+    open(os.path.join(sbig, "saves", "world_big", "level.dat"), "w").write("x" * 100)
+
+    class _BigCfg:
+        def __init__(self, confirm=True):
+            self.log = mm.Logger(lambda m, l="info": None)
+            self.confirm = lambda p: confirm
+            self.choices = {"config": True, "options": True, "saves": True,
+                            "stray": True, "optional": True, "server": False}
+            self.pending_big = []
+
+    try:
+        bcfg = _BigCfg()
+        _mig2.migrate_game_data(sbig, dbig, bcfg)
+        ok(len(bcfg.pending_big) == 1 and bcfg.pending_big[0][0] == "saves",
+           "超过阈值的大目录进入延迟队列: %s" % [p[0] for p in bcfg.pending_big])
+        ok(not os.path.exists(os.path.join(dbig, "saves")), "大目录未立即复制")
+        _mig2.migrate_big_folders(bcfg)
+        ok(os.path.exists(os.path.join(dbig, "saves", "world_big", "level.dat")),
+           "末尾确认后迁移完成")
+        bcfg2 = _BigCfg(confirm=False)
+        _mig2.migrate_game_data(sbig, dbig2, bcfg2)
+        _mig2.migrate_big_folders(bcfg2)
+        ok(not os.path.exists(os.path.join(dbig2, "saves")), "拒绝后不迁移")
+    finally:
+        _mig2.BIG_FOLDER_THRESHOLD = _orig_thr
+
     print("== 12. 版本挑选：无适配目标版本绝不下载 ==")
     import mc_migrator.modrinth as _mr
     _orig_versions = _mr.mr_versions

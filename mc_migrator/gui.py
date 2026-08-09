@@ -108,7 +108,7 @@ class MainWindow(QtWidgets.QWidget):
     def _build_ui(self):
         from .core import CHOICE_KEYS, CHOICE_LABELS, LOADERS, LOADER_LABEL
 
-        self.setWindowTitle("MC 模组迁移 / 更新工具")
+        self.setWindowTitle("MCModMigrator")
         self.resize(820, 640)
         root = QtWidgets.QVBoxLayout(self)
 
@@ -160,7 +160,6 @@ class MainWindow(QtWidgets.QWidget):
         cw = QtWidgets.QHBoxLayout(self.dst_client_widget)
         cw.setContentsMargins(0, 0, 0, 0)
         cw.addWidget(self.dst_version_combo)
-        cw.addWidget(QtWidgets.QLabel("(留空=mods 放根目录)"))
         cw.addStretch(1)
         self.dst_server_widget = QtWidgets.QWidget()
         sw = QtWidgets.QHBoxLayout(self.dst_server_widget)
@@ -203,10 +202,9 @@ class MainWindow(QtWidgets.QWidget):
         self.auto_yes_chk = QtWidgets.QCheckBox("自动确认模组匹配")
         self.deps_chk = QtWidgets.QCheckBox("自动下载依赖")
         self.deps_chk.setChecked(True)
-        self.data_master_chk = QtWidgets.QCheckBox("迁移数据")
-        self.data_master_chk.setChecked(True)
-        self.data_master_chk.toggled.connect(self._toggle_data_group)
-        opt.addWidget(self.data_master_chk, 0, 0)
+        self.mods_chk = QtWidgets.QCheckBox("迁移mod")
+        self.mods_chk.setChecked(True)
+        opt.addWidget(self.mods_chk, 0, 0)
         opt.addWidget(self.auto_yes_chk, 0, 1)
         opt.addWidget(self.deps_chk, 0, 2)
         self.data_checks = {}
@@ -328,8 +326,8 @@ class MainWindow(QtWidgets.QWidget):
             self._overwrite_mode = False
             self.dst_root_edit.setEnabled(True)
             self.dst_browse_btn.setEnabled(True)
-            self.data_master_chk.setEnabled(True)
-            self._toggle_data_group(self.data_master_chk.isChecked())
+            for ck in self.data_checks.values():
+                ck.setEnabled(True)
         self._auto_set_mc_version()
 
     def _on_dst_overwrite_changed(self):
@@ -337,7 +335,7 @@ class MainWindow(QtWidgets.QWidget):
         self._overwrite_mode = ov
         self.dst_root_edit.setEnabled(not ov)
         self.dst_browse_btn.setEnabled(not ov)
-        for ck in [self.data_master_chk] + list(self.data_checks.values()):
+        for ck in self.data_checks.values():
             ck.setEnabled(not ov)
         if ov:
             self.dst_root_edit.setText(self.src_root_edit.text().strip())
@@ -360,7 +358,7 @@ class MainWindow(QtWidgets.QWidget):
                 mc_root, version = vd
                 if self.src_root_edit.text().strip() != mc_root:
                     self.src_root_edit.setText(mc_root)
-                self._select_version(self.src_version_combo, self._src_versions, version)
+                self._select_version(self.src_version_combo, self._src_versions, version, offset=1)
                 return
         if os.path.isdir(root) and is_server_root(root) and not self.s2s_radio.isChecked():
             self.s2s_radio.setChecked(True)
@@ -377,6 +375,7 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.src_version_combo.setEnabled(True)
             self._src_versions = list_clients(root) if os.path.isdir(root) else []
+            self.src_version_combo.addItem("非版本隔离")
             for name, loader in self._src_versions:
                 tag = "  [%s]" % LOADER_LABEL[loader] if loader else ""
                 self.src_version_combo.addItem(name + tag)
@@ -411,7 +410,7 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.dst_version_combo.setEnabled(True)
             self._target_versions = list_clients(root) if os.path.isdir(root) else []
-            self.dst_version_combo.addItem("(不使用版本目录，mods 放根目录)")
+            self.dst_version_combo.addItem("非版本隔离")
             for name, loader in self._target_versions:
                 tag = "  [%s]" % LOADER_LABEL[loader] if loader else ""
                 self.dst_version_combo.addItem(name + tag)
@@ -429,8 +428,8 @@ class MainWindow(QtWidgets.QWidget):
     def _on_src_version_changed(self):
         from .core import LOADER_LABEL
         idx = self.src_version_combo.currentIndex()
-        if 0 <= idx < len(self._src_versions):
-            loader = self._src_versions[idx][1]
+        if idx > 0 and idx - 1 < len(self._src_versions):
+            loader = self._src_versions[idx - 1][1]
             self.src_ver_label.setText("加载器: %s" % (LOADER_LABEL[loader] if loader else "未识别"))
             self._auto_loader_default(loader)
         else:
@@ -488,10 +487,6 @@ class MainWindow(QtWidgets.QWidget):
             self.mc_combo.setEditText(base)
         self.mc_combo.blockSignals(False)
 
-    def _toggle_data_group(self, on):
-        for ck in self.data_checks.values():
-            ck.setEnabled(on)
-
     def _start(self):
         mc_root = self.src_root_edit.text().strip().strip('"')
         if not os.path.isdir(mc_root):
@@ -499,10 +494,13 @@ class MainWindow(QtWidgets.QWidget):
             return
         if self._mode == "c2c":
             idx = self.src_version_combo.currentIndex()
-            if not (0 <= idx < len(self._src_versions)):
+            if idx > 0 and idx - 1 < len(self._src_versions):
+                src_version = self._src_versions[idx - 1][0]
+            elif idx == 0:
+                src_version = None
+            else:
                 QtWidgets.QMessageBox.warning(self, "错误", "请先在源游戏目录下选择客户端版本")
                 return
-            src_version = self._src_versions[idx][0]
             t_root = self.dst_root_edit.text().strip().strip('"')
             if not os.path.isdir(t_root):
                 QtWidgets.QMessageBox.warning(self, "错误", "目标目录不存在:\n" + t_root)
@@ -522,7 +520,7 @@ class MainWindow(QtWidgets.QWidget):
                     return
                 t_version = None
 
-        src_force = bool(self._src_vdir and src_version == self._src_vdir[1]
+        src_force = bool(src_version and self._src_vdir and src_version == self._src_vdir[1]
                          and mc_root == self._src_vdir[0].strip().strip('"'))
         t_force = bool(self._dst_vdir and t_version == self._dst_vdir[1]
                        and t_root == self._dst_vdir[0].strip().strip('"'))
@@ -540,7 +538,7 @@ class MainWindow(QtWidgets.QWidget):
         else:
             choices = {}
             for k, ck in self.data_checks.items():
-                choices[k] = self.data_master_chk.isChecked() and ck.isChecked()
+                choices[k] = ck.isChecked()
 
         from .migrator import RunConfig
 
@@ -548,6 +546,7 @@ class MainWindow(QtWidgets.QWidget):
             auto_yes=self.auto_yes_chk.isChecked(),
             skip_deps=not self.deps_chk.isChecked(),
             choices=choices,
+            migrate_mods=self.mods_chk.isChecked(),
             use_system_proxy=self.proxy_chk.isChecked(),
             download_threads=self.threads_spin.value(),
             analysis_threads=self.analysis_spin.value(),
@@ -558,6 +557,7 @@ class MainWindow(QtWidgets.QWidget):
         params = {"src_root": mc_root, "src_version": src_version,
                   "target_root": t_root, "target_version": t_version,
                   "src_force_isolated": src_force,
+                  "src_is_server": self._mode == "s2s",
                   "target_force_isolated": t_force,
                   "target_loader": t_loader, "target_mc": t_mc,
                   "stop_event": self.stop_event}
@@ -719,9 +719,10 @@ class MainWindow(QtWidgets.QWidget):
         base = self.src_root_edit.text().strip()
         if self._mode == "s2s":
             return base + " (服务端)"
-        if self._src_versions:
-            return base + "/" + self._src_versions[self.src_version_combo.currentIndex()][0]
-        return base
+        idx = self.src_version_combo.currentIndex()
+        if self._src_versions and idx > 0:
+            return base + "/" + self._src_versions[idx - 1][0]
+        return base + "（非隔离）"
 
     def _dst_desc(self):
         base = self.dst_root_edit.text().strip()

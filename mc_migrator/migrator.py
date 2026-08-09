@@ -3,6 +3,8 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+BIG_FOLDER_THRESHOLD = 5 * 1024 ** 3
+
 from .core import (ASK_CONF, CHOICE_KEYS, HIGH_CONF, KNOWN_DIRS, KNOWN_FILES,
                    LOADER_LABEL, OPTIONAL_DIRS, OPTIONAL_FILES, SERVER_FILES,
                    Logger, PROXY_SETTINGS, human_size, plain_log_sink)
@@ -23,7 +25,8 @@ def _make_dep_logger(base, report):
 class RunConfig:
     def __init__(self, auto_yes=False, skip_deps=False, choices=None,
                  use_system_proxy=True, download_threads=4, analysis_threads=4,
-                 print_failures=True, ignore_fork=False, log=None, confirm=None):
+                 print_failures=True, ignore_fork=False, migrate_mods=True,
+                 log=None, confirm=None):
         self.auto_yes = auto_yes
         self.skip_deps = skip_deps
         self.use_system_proxy = use_system_proxy
@@ -31,7 +34,9 @@ class RunConfig:
         self.analysis_threads = max(1, min(int(analysis_threads or 8), 16))
         self.print_failures = print_failures
         self.ignore_fork = ignore_fork
+        self.migrate_mods = migrate_mods
         self.on_conflicts = None
+        self.pending_big = []
         self.choices = choices or {k: True for k in CHOICE_KEYS}
         self.log = log or Logger(plain_log_sink)
         self.confirm = confirm or (lambda p: True)
@@ -362,11 +367,20 @@ def migrate_game_data(src_root, dst_root, cfg):
     if not any(choices.get(k) for k in CHOICE_KEYS):
         cfg.log.info("未勾选任何数据类别，跳过")
         return
+    def _defer_or_copy(label, src, dst, kind):
+        size = dir_size(src)
+        if size > BIG_FOLDER_THRESHOLD:
+            cfg.pending_big.append((label, src, dst, kind))
+            cfg.log.info("%s (%s) 超过 5GB，留到最后询问后迁移" % (label, human_size(size)))
+            return True
+        return False
+
     if choices.get("config"):
         sc = os.path.join(src_root, "config")
         if os.path.isdir(sc):
-            cfg.log.info("正在迁移 config 目录 (%s) ..." % human_size(dir_size(sc)))
-            copy_tree_overwrite(sc, os.path.join(dst_root, "config"), cfg.log)
+            if not _defer_or_copy("config", sc, os.path.join(dst_root, "config"), "overwrite"):
+                cfg.log.info("正在迁移 config 目录 (%s) ..." % human_size(dir_size(sc)))
+                copy_tree_overwrite(sc, os.path.join(dst_root, "config"), cfg.log)
         else:
             cfg.log.info("源目录没有 config，跳过")
     if choices.get("options"):
@@ -380,9 +394,10 @@ def migrate_game_data(src_root, dst_root, cfg):
         sdir = "world" if server_mode else "saves"
         ss = os.path.join(src_root, sdir)
         if os.path.isdir(ss):
-            cfg.log.info("正在迁移 %s (%s)，重名自动加 _old ..." % (sdir, human_size(dir_size(ss))))
-            n, r = copy_saves_merge(ss, os.path.join(dst_root, sdir), cfg.log)
-            cfg.log.info("%s 迁移完成：复制 %d 项，重名改名 %d 项（已加 _old）" % (sdir, n, r))
+            if not _defer_or_copy(sdir, ss, os.path.join(dst_root, sdir), "saves"):
+                cfg.log.info("正在迁移 %s (%s)，重名自动加 _old ..." % (sdir, human_size(dir_size(ss))))
+                n, r = copy_saves_merge(ss, os.path.join(dst_root, sdir), cfg.log)
+                cfg.log.info("%s 迁移完成：复制 %d 项，重名改名 %d 项（已加 _old）" % (sdir, n, r))
         else:
             cfg.log.info("源目录没有 %s，跳过" % sdir)
     if choices.get("stray"):
@@ -395,6 +410,8 @@ def migrate_game_data(src_root, dst_root, cfg):
                 cfg.log.info("  %s" % f)
             for d in stray_dirs:
                 s, dst = os.path.join(src_root, d), os.path.join(dst_root, d)
+                if _defer_or_copy(d, s, dst, "missing"):
+                    continue
                 n = copy_tree_missing(s, dst)
                 cfg.log.info("%s/ 已迁移（新复制 %d 个文件）" % (d, n))
             for f in stray_files:
@@ -425,6 +442,28 @@ def migrate_game_data(src_root, dst_root, cfg):
         if not copied:
             cfg.log.info("源服务端没有服务端专属文件，跳过")
 
+
+def migrate_big_folders(cfg):
+    if not cfg.pending_big:
+        return
+    lines = ["以下目录超过 5GB，是否现在迁移？"]
+    for label, src, _dst, _kind in cfg.pending_big:
+        lines.append("  %s（%s）" % (label, human_size(dir_size(src))))
+    if not cfg.confirm("\n".join(lines)):
+        cfg.log.info("已跳过 %d 个大目录的迁移" % len(cfg.pending_big))
+        return
+    for label, src, dst, kind in cfg.pending_big:
+        if kind == "saves":
+            n, r = copy_saves_merge(src, dst, cfg.log)
+            cfg.log.info("%s 迁移完成：复制 %d 项，重名改名 %d 项（已加 _old）" % (label, n, r))
+        elif kind == "overwrite":
+            cfg.log.info("正在迁移 %s (%s) ..." % (label, human_size(dir_size(src))))
+            copy_tree_overwrite(src, dst, cfg.log)
+        else:
+            n = copy_tree_missing(src, dst)
+            cfg.log.info("%s 迁移完成：新复制 %d 个文件" % (label, n))
+    cfg.pending_big = []
+
 def run_migration(params, cfg):
     stop_event = params.get("stop_event")
     mc_root, src_version = params["src_root"], params["src_version"]
@@ -439,10 +478,14 @@ def run_migration(params, cfg):
             mc_root, src_version, force_isolated=params.get("src_force_isolated", False))
         src_loader = detect_loader(mc_root, src_version)
         src_desc = "%s%s" % (src_version, "（版本隔离）" if src_isolated else "")
-    else:
+    elif params.get("src_is_server", False):
         src_client, src_isolated = mc_root, False
         src_loader = sniff_server_loader(mc_root)
         src_desc = "服务端根目录"
+    else:
+        src_client, src_isolated = mc_root, False
+        src_loader = None
+        src_desc = "根目录（非隔离客户端，mods 在根目录）"
     cfg.log.info("源: %s%s" % (src_desc, ("  [%s]" % LOADER_LABEL[src_loader]) if src_loader else ""))
     cfg.log.info("根目录: %s" % src_client)
     if not src_loader:
@@ -484,9 +527,12 @@ def run_migration(params, cfg):
     from .graph import ModGraph
     from .versions import base_mc_version
     graph = ModGraph()
-    src_mc_ver = base_mc_version(src_version) if src_version else ""
-    migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event, graph,
-                 src_mc_version=src_mc_ver)
+    if cfg.migrate_mods:
+        src_mc_ver = base_mc_version(src_version) if src_version else ""
+        migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event, graph,
+                     src_mc_version=src_mc_ver)
+    else:
+        cfg.log.info("未勾选「迁移 mod」，跳过模组迁移")
 
     if not same_client:
         migrate_game_data(src_client, dst_client, cfg)
@@ -500,6 +546,8 @@ def run_migration(params, cfg):
         removed = resolve_conflicts(graph, cfg)
         if removed:
             report["ok"] = [(n, f) for n, f in report["ok"] if f not in removed]
+
+    migrate_big_folders(cfg)
     return report, same_client
 
 

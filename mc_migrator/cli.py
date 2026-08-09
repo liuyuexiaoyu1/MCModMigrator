@@ -143,8 +143,10 @@ def run_cli(args):
             src_version = args.src_version
         else:
             items = ["%s  [%s]" % (n, LOADER_LABEL[l]) if l else n for n, l in clients]
-            src_version = clients[pick_from_list("选择源客户端（已装加载器）:", items)][0]
-        src_loader = detect_loader(mc_root, src_version)
+            items.insert(0, "非版本隔离")
+            idx = pick_from_list("选择源客户端（已装加载器）:", items)
+            src_version = clients[idx - 1][0] if idx > 0 else None
+        src_loader = detect_loader(mc_root, src_version) if src_version else None
         
     if args.target_loader:
         t_loader = args.target_loader
@@ -177,7 +179,7 @@ def run_cli(args):
                 t_clients = list_clients(t_root)
                 if t_clients:
                     items = ["%s  [%s]" % (n, LOADER_LABEL[l]) if l else n for n, l in t_clients]
-                    items.insert(0, "(不使用版本目录，mods 放在根目录)")
+                    items.insert(0, "非版本隔离")
                     idx = pick_from_list("选择目标客户端版本:", items)
                     t_version = t_clients[idx - 1][0] if idx > 0 else None
                 else:
@@ -185,7 +187,7 @@ def run_cli(args):
                     print("目标根目录下没有发现版本，将按非隔离客户端处理")
 
     if src_is_server != t_is_server:
-        die("仅支持同类型迁移：服务端→服务端 (S2S) 或 客户端→客户端 (C2C)，"
+        die("仅支持同类型迁移：服务端→服务端 或 客户端→客户端，"
             "源与目标类型不一致")
 
     if args.target_mc:
@@ -242,6 +244,7 @@ def run_cli(args):
 
     cfg = RunConfig(auto_yes=args.yes, skip_deps=args.skip_deps,
                     choices=choices,
+                    migrate_mods=not args.no_mods,
                     use_system_proxy=not args.no_system_proxy,
                     download_threads=args.threads,
                     analysis_threads=args.analysis_threads,
@@ -252,6 +255,7 @@ def run_cli(args):
     params = {"src_root": mc_root, "src_version": src_version,
               "target_root": t_root, "target_version": t_version,
               "src_force_isolated": src_force_isolated,
+              "src_is_server": src_is_server,
               "target_force_isolated": t_force_isolated,
               "target_loader": t_loader, "target_mc": t_mc,
               "stop_event": None}
