@@ -28,20 +28,20 @@ jobs:
 
       - name: Read version constant
         id: version
-        run: |
-          echo "version=$(python -c "import mc_migrator; print(mc_migrator.__version__)")" >> $GITHUB_OUTPUT
+        shell: bash
+        run: echo "version=$(python -c 'import mc_migrator; print(mc_migrator.__version__)')" >> $GITHUB_OUTPUT
 
       - name: Run unit tests
         run: python tests/test_core.py
 
       - name: Build exe
-        run: python -m PyInstaller --onefile --windowed --clean --noconfirm --name "MCModMigrator-${{ steps.version.outputs.version }}" mod_migrator.py
+        run: python -m PyInstaller --onefile --windowed --clean --noconfirm --name "MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}" mod_migrator.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCModMigrator-${{ steps.version.outputs.version }}
-          path: dist/MCModMigrator-${{ steps.version.outputs.version }}.exe
+          name: MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}
+          path: dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}.exe
           if-no-files-found: error
 
   release:
@@ -55,11 +55,11 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: MCModMigrator-${{ needs.build.outputs.version }}*
+          pattern: MCModMigrator-${{ needs.build.outputs.version || '0.0.0' }}*
           path: release-dist
           merge-multiple: true
 
       - name: Upload exe
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" release-dist/MCModMigrator-${{ needs.build.outputs.version }}.exe --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" release-dist/MCModMigrator-${{ needs.build.outputs.version || '0.0.0' }}.exe --clobber
