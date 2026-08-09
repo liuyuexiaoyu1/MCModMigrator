@@ -94,6 +94,10 @@ build_exe.bat
 - 部分杀毒软件对 PyInstaller 单文件 exe 有误报，属正常现象，可加白名单。
 - 验证打包产物：`.venv\Scripts\python tests\test_exe_e2e.py`。
 
+## CI 自动构建与发布（GitHub Actions）
+
+`.github/workflows/build.yml`
+
 ## 目录结构（模块解耦）
 
 ```

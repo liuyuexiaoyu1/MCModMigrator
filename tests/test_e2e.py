@@ -307,11 +307,18 @@ def test_fork_detection(tmp):
 
     try:
         import requests
-        members = requests.get("https://api.modrinth.com/v2/project/jade/members",
-                               headers={"User-Agent": "mc-mod-migrator-test"}, timeout=30).json()
-        real_authors = [m["user"]["username"] for m in members]
+        import tempfile as _tf
+        vs = requests.get("https://api.modrinth.com/v2/project/jade/version",
+                          params={"game_versions": '["1.20.1"]', "loaders": '["fabric"]'},
+                          headers={"User-Agent": "mc-mod-migrator-test"}, timeout=30).json()
+        newest = max(vs, key=lambda v: v.get("date_published") or "")
+        tj = os.path.join(_tf.gettempdir(), newest["files"][0]["filename"])
+        with open(tj, "wb") as f:
+            f.write(requests.get(newest["files"][0]["url"],
+                                 headers={"User-Agent": "mc-mod-migrator-test"}, timeout=60).content)
+        real_authors = mm.parse_mod_jar(tj)["authors"]
     except Exception as e:
-        print("  · 跳过 fork 测试（无法获取项目成员）: %s" % e)
+        print("  · 跳过 fork 测试（无法获取官方 jar）: %s" % e)
         return None
 
     for name, mid, authors in (("jade_real.jar", "jade", real_authors),

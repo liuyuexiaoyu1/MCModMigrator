@@ -11,7 +11,7 @@ from urllib.parse import quote
 import requests
 
 from .core import ASK_CONF, USER_AGENT, LOADER_LABEL, effective_proxies, human_size
-from .mod_parser import is_wrapper_meta, sha1_of, wrapper_base_id
+from .mod_parser import is_wrapper_meta, parse_mod_jar, sha1_of, wrapper_base_id
 
 API_BASE = "https://api.modrinth.com/v2"
 _SESSION = requests.Session()
@@ -444,28 +444,31 @@ def match_to_project(meta, mc_version, loader, jar_path, ignore_fork=False,
                             return pid, 1.0, ("wrapper 内嵌 jar 同版本号 %s 且文件 sha1 完全一致"
                                               % rep_ver), (matched if isinstance(matched, str) else None)
 
-            members = None
-            if best[0] >= ASK_CONF and jar_authors:
-                try:
-                    members = project_members(pid)
-                except requests.RequestException:
-                    members = None
-            if members:
-                if authors_equal(jar_authors, members):
-                    why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
-                    return pid, best[0], why + "（作者校验通过）", None
-                if jar_version:
-                    same = _find_same_version(pid, jar_version, filter_mc, loader)
-                    if same:
-                        matched = _same_version_compare(same, compare_dir, jar_sha1)
-                        if matched:
-                            return pid, 1.0, ("作者不一致，但同版本号 %s 且文件 sha1 完全一致"
-                                              "（原版文件）" % jar_version), \
-                                (matched if isinstance(matched, str) else None)
-                if ignore_fork:
-                    return pid, 1.0, "作者校验未通过，已按选项忽略（疑似 fork 版，请留意）", None
-                return None, 0.0, ("作者列表与 Modrinth 项目不一致，且同版本号文件校验未通过"
-                                   "（疑似 fork 版模组）"), None
+            if best[0] >= ASK_CONF and jar_authors and compare_dir:
+                cand = pick_version(pid, filter_mc, loader)[0]
+                if cand:
+                    dest, err = mr_download_file(cand, compare_dir)
+                    if dest:
+                        cm = parse_mod_jar(dest)
+                        try:
+                            os.remove(dest)
+                        except OSError:
+                            pass
+                        if cm and cm.get("authors"):
+                            if authors_equal(jar_authors, cm["authors"]):
+                                why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
+                                return pid, best[0], why + "（作者校验通过）", None
+                            if jar_version:
+                                same = _find_same_version(pid, jar_version, filter_mc, loader)
+                                if same:
+                                    matched = _same_version_compare(same, compare_dir, jar_sha1)
+                                    if matched:
+                                        return pid, 1.0, ("作者不一致，但同版本号 %s 且文件 sha1 "
+                                                          "完全一致（原版文件）" % jar_version), \
+                                            (matched if isinstance(matched, str) else None)
+                            if ignore_fork:
+                                return pid, 1.0, "作者校验未通过，已按选项忽略（疑似 fork 版，请留意）", None
+                            return None, 0.0, "作者不一致（疑似 fork 版模组）", None
 
             why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
             return pid, best[0], why, None
