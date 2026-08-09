@@ -18,6 +18,8 @@ from .modrinth import (Downloader, collect_deps, configure_http,
 def _make_dep_logger(base, report):
     def sink(msg, level):
         getattr(base, level)(msg)
+        if msg.startswith("提交依赖下载"):
+            return
         report["deps"].append(msg)
     return Logger(sink)
 
@@ -596,24 +598,78 @@ def print_summary(report, same_client):
 
 
 def write_report_file(report, src_desc, dst_desc):
+    import html as _html
     from urllib.parse import quote
-    lines = ["MC 模组迁移报告", "时间: %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             "源: %s" % src_desc, "目标: %s" % dst_desc, ""]
-    lines.append("成功下载 %d 个模组:" % len(report["ok"]))
-    for name, fname in report["ok"]:
-        lines.append("  ✓ %s -> %s" % (name, fname))
-    if report["skipped"]:
-        lines.append("")
-        lines.append("跳过 %d 个（库文件/非模组）:" % len(report["skipped"]))
-        lines += ["  · " + j for j in report["skipped"]]
-    if report["manual"]:
-        lines.append("")
-        lines.append("需要手动处理 %d 个:" % len(report["manual"]))
-        for jname, meta, why in report["manual"]:
-            q = meta.get("name") or meta.get("id") or jname
-            lines.append("  - %s（%s）" % (jname, why))
-            lines.append("    搜索: https://modrinth.com/search?q=%s" % quote(q))
-    fname = os.path.join(os.getcwd(), "迁移报告_%s.txt" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+    now = datetime.now()
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    ok_html = "".join(
+        '<div class="ok-item"><span class="ok-name">%s</span><span class="ok-file">%s</span></div>'
+        % (esc(n), esc(f)) for n, f in report["ok"])
+    skip_html = "".join('<div class="skip-item">%s</div>' % esc(j) for j in report["skipped"])
+    dep_html = "".join('<div class="dep-item">%s</div>' % esc(d) for d in report["deps"])
+    manual_html = "".join(
+        '<div class="manual-item"><span class="manual-name">%s</span>'
+        '<span class="manual-file">%s</span>'
+        '<span class="manual-reason">%s</span>'
+        '<a class="manual-link" href="https://modrinth.com/search?q=%s" target="_blank">Modrinth 搜索</a></div>'
+        % (esc((meta or {}).get("name") or (meta or {}).get("id") or jname),
+           esc(jname), esc(why),
+           quote((meta or {}).get("name") or (meta or {}).get("id") or jname))
+        for jname, meta, why in report["manual"])
+
+    def card(title, color, body):
+        if not body:
+            return ""
+        return ('<div class="card"><h2 style="border-left:4px solid %s">%s</h2>%s</div>'
+                % (color, esc(title), body))
+
+    stats = ('<div class="card stats">'
+             '<div class="stat"><b>%d</b><span>成功下载</span></div>'
+             '<div class="stat warn"><b>%d</b><span>需手动处理</span></div>'
+             '<div class="stat"><b>%d</b><span>依赖</span></div>'
+             '<div class="stat"><b>%d</b><span>跳过</span></div></div>'
+             % (len(report["ok"]), len(report["manual"]), len(report["deps"]),
+                len(report["skipped"])))
+
+    page = ('<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+            '<title>MC 模组迁移报告</title>\n<style>\n'
+            'body{font-family:"Microsoft YaHei","Segoe UI",sans-serif;background:#f4f5f7;color:#222;margin:0;padding:28px}\n'
+            '.wrap{max-width:920px;margin:0 auto}\n'
+            'h1{font-size:22px;margin:0 0 6px}\n'
+            '.meta{color:#666;font-size:13px;margin-bottom:8px;line-height:1.7}\n'
+            '.card{background:#fff;border-radius:10px;padding:18px 22px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.07)}\n'
+            'h2{font-size:15px;margin:0 0 12px;padding-left:10px}\n'
+            '.stats{display:flex;gap:14px;flex-wrap:wrap}\n'
+            '.stat{flex:1;min-width:120px;background:#fafbfc;border-radius:8px;padding:12px;text-align:center}\n'
+            '.stat b{display:block;font-size:24px;color:#222}\n'
+            '.stat span{color:#777;font-size:12px}\n'
+            '.stat.warn b{color:#c99700}\n'
+            '.ok-item,.skip-item,.dup-item,.dep-item{padding:6px 4px;border-bottom:1px dashed #eee;font-size:13px}\n'
+            '.ok-name{font-weight:600;color:#1a7f37}\n'
+            '.ok-file{color:#888;margin-left:8px}\n'
+            '.skip-item{color:#888}\n'
+            '.dup-item{color:#5b6b8c}\n'
+            '.manual-item{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:9px 12px;margin:7px 0;'
+            'border-left:4px solid #eab308;background:#fffdf2;border-radius:6px;font-size:13px}\n'
+            '.manual-name{font-weight:700;color:#a16207;background:#fde68a;padding:1px 8px;border-radius:4px}\n'
+            '.manual-file{color:#888;font-size:12px}\n'
+            '.manual-reason{color:#000}\n'
+            '.manual-link{color:#0b5cad;text-decoration:none;font-size:12px;margin-left:auto}\n'
+            '.manual-link:hover{text-decoration:underline}\n'
+            '</style>\n</head>\n<body><div class="wrap">\n'
+            '<h1>MC 模组迁移报告</h1>\n'
+            '<div class="meta">时间：%s<br>源：%s<br>目标：%s</div>\n%s\n%s\n%s\n%s\n%s\n'
+            '</div></body></html>'
+            % (now.strftime("%Y-%m-%d %H:%M:%S"), esc(src_desc), esc(dst_desc), stats,
+               card("成功下载", "#2ea043", ok_html),
+               card("需手动处理", "#eab308", manual_html),
+               card("依赖", "#5b6b8c", dep_html),
+               card("跳过", "#888", skip_html)))
+
+    fname = os.path.join(os.getcwd(), "迁移报告_%s.html" % now.strftime("%Y%m%d_%H%M%S"))
     with open(fname, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write(page)
     return fname

@@ -12,10 +12,9 @@ build/
 dist/
 *.spec
 
-# 迁移报告 / 运行日志
-迁移报告_*.txt
-迁移日志.txt
-thread_dump.txt
+# 迁移报告
+迁移报告_*.html
+迁移日志.html
 
 # IDE
 .idea/
