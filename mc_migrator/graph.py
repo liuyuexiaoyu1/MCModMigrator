@@ -57,6 +57,18 @@ class ModGraph:
                         "file": self.mods[mid].get("file"),
                         "dependents": sorted(self.dependents[mid]),
                         "conflicting": sorted(self.conflicting[mid])})
+        seen = {item["mod"] for item in out}
+        for a, reqs in self.conf_reqs.items():
+            for b, ranges in reqs.items():
+                if b in seen or b not in self.mods:
+                    continue
+                bv = self.mods[b].get("version")
+                if bv and any(version_satisfies(bv, r) for r in ranges):
+                    out.append({"mod": b,
+                                "name": self.mods[b].get("name") or b,
+                                "file": self.mods[b].get("file"),
+                                "dependents": [],
+                                "conflicting": [a]})
         return out
 
     def remove(self, mod_id):
@@ -81,15 +93,73 @@ class ModGraph:
                 sum(len(v) for v in self.conf_reqs.values()))
 
 
+PRERELEASE_RANK = {"alpha": 1, "beta": 2, "rc": 3}
+
+
 def version_satisfies(version, constraint):
     constraint = (constraint or "").strip()
     if not constraint or constraint == "*":
         return True
-    return all(_version_cmp(version, c) for c in re.split(r"[,\s]+", constraint) if c)
+    parts = [p for p in re.split(r"\|\|", constraint) if p.strip()]
+    if len(parts) > 1:
+        return any(version_satisfies(version, p) for p in parts)
+    checks = []
+    for c in re.split(r"[,\s]+", constraint):
+        if not c:
+            continue
+        if c.startswith("~") or c.startswith("^"):
+            checks.extend(_expand_tilde_caret(c))
+        else:
+            checks.append(c)
+    return all(_version_cmp(version, c) for c in checks)
+
+
+def _expand_tilde_caret(c):
+    op, body = c[0], c[1:]
+    nums = _vkey(body)
+    body_has_dash = body.endswith("-")
+    body_core = body[:-1] if body_has_dash else body
+    lo = body_core
+    if op == "~":
+        if len(nums) >= 2:
+            hi = "%d.%d.0-" % (nums[0], nums[1] + 1)
+        else:
+            hi = "%d.%d.0-" % (nums[0], 1)
+        if not body_has_dash and "-" not in body_core:
+            lo = ".".join(str(x) for x in (nums + [0, 0, 0])[:3])
+        return [">=" + lo + ("-" if body_has_dash else ""), "<" + hi]
+    hi = "%d.0.0-" % ((nums[0] if nums else 0) + 1)
+    return [">=" + lo + ("-" if body_has_dash else ""), "<" + hi]
 
 
 def _vkey(version):
-    return [int(x) for x in re.findall(r"\d+", str(version))]
+    core = str(version or "").partition("+")[0].partition("-")[0]
+    return [int(x) for x in re.findall(r"\d+", core)]
+
+
+def _prerank(version):
+    pre = str(version or "").partition("+")[0].partition("-")[2]
+    if not pre:
+        return 0
+    m = re.match(r"([a-zA-Z]+)", pre)
+    return PRERELEASE_RANK.get((m.group(1) if m else "").lower(), 4)
+
+
+def _vcmp(a, b, b_low_pre=False):
+    na, nb = _vkey(a), _vkey(b)
+    n = max(len(na), len(nb))
+    na += [0] * (n - len(na))
+    nb += [0] * (n - len(nb))
+    if na != nb:
+        return (na > nb) - (na < nb)
+    pa, pb = _prerank(a), (-1 if b_low_pre else _prerank(b))
+    if pa == pb:
+        return 0
+    if pa == 0:
+        return 1
+    if pb == 0:
+        return -1
+    return (pa > pb) - (pa < pb)
 
 
 def _version_cmp(version, c):
@@ -112,19 +182,19 @@ def _version_cmp(version, c):
         m = re.match(r"^(>=|<=|>|<|==)?\s*(.+)$", c)
         op = m.group(1) or "=="
         c = m.group(2).strip()
-    req = c
-    if not req or req == "*":
+    if not c or c == "*":
         return True
-    a = _vkey(version)
-    if "x" in req.lower():
-        b = _vkey(re.sub(r"[xX]", "0", req))
+    low_pre = False
+    if c.endswith("-"):
+        c = c[:-1]
+        low_pre = True
+    if "x" in c.lower() or "*" in c:
+        head = c.split("x")[0].split("X")[0].split("*")[0]
+        b = [int(x) for x in re.findall(r"\d+", head)]
+        a = _vkey(version)
         if len(a) < len(b):
             return False
         return a[:len(b)] == b
-    b = _vkey(req)
-    n = max(len(a), len(b))
-    a = a + [0] * (n - len(a))
-    b = b + [0] * (n - len(b))
-    cmpv = (a > b) - (a < b)
+    cmpv = _vcmp(version, c, low_pre)
     return {"==": cmpv == 0, ">": cmpv > 0, ">=": cmpv >= 0,
             "<": cmpv < 0, "<=": cmpv <= 0}[op]

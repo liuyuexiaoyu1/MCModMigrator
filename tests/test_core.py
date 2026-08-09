@@ -456,6 +456,34 @@ try:
     ok(mm.version_satisfies("1.20.1", "1.20.1"), "精确相等")
     ok(mm.version_satisfies("1.5", "[1.0,2.0)"), "Forge 区间 [1.0,2.0) 满足")
     ok(not mm.version_satisfies("2.0", "[1.0,2.0)"), "Forge 区间右开不满足")
+    ok(mm.version_satisfies("0.9.2-alpha.4+mc26.2", ">=0.9.1"),
+       "预发布+构建元数据：0.9.2-alpha.4 满足 >=0.9.1")
+    ok(not mm.version_satisfies("0.9.2-alpha.4+mc26.2", ">=0.9.2"),
+       "预发布 < 同核心正式版：不满足 >=0.9.2")
+    ok(mm.version_satisfies("0.9.2", ">=0.9.2-alpha.4"), "正式版满足 >= 同版本预发布")
+    ok(mm.version_satisfies("7.4.5+7590-b8dc4c1", ">7.4.4 || <7.4.4"),
+       "|| 或语义：7.4.5 命中 >7.4.4")
+    ok(not mm.version_satisfies("7.4.4", ">7.4.4 || <7.4.4"), "|| 或语义：恰好 7.4.4 不命中")
+    ok(mm.version_satisfies("1.0.0+mc26.2", "1.0.0"), "构建元数据不参与比较")
+    ok(mm.version_satisfies("1.0.0-rc1", ">=1.0.0-alpha.1"), "rc > alpha")
+    ok(mm.version_satisfies("0.9.2-alpha.4+mc26.2", ">=0.9.1 <0.10-"),
+       "fabric 区间 [0.9.1, 0.10-) 对 0.9.2-alpha.4 判定")
+    ok(not mm.version_satisfies("0.10-beta.2", "<0.10-"), "fabric: <0.10- 排除 0.10 预发布")
+    ok(mm.version_satisfies("1.4-beta.2", "<1.4"), "fabric: <1.4 包含 1.4 预发布")
+    ok(not mm.version_satisfies("1.4-beta.2", "<1.4-"), "fabric: <1.4- 排除 1.4 预发布")
+    ok(mm.version_satisfies("1.4-beta.2", ">=1.4-"), "fabric: >=1.4- 包含 1.4 预发布")
+    ok(mm.version_satisfies("1.4", ">=1.4-"), "fabric: >=1.4- 包含 1.4")
+    ok(not mm.version_satisfies("1.3", ">=1.4-"), "fabric: >=1.4- 排除 1.3")
+    ok(mm.version_satisfies("1.3.0-alpha.1", "1.3.x"), "fabric x 区间含预发布")
+    ok(not mm.version_satisfies("1.4.0", "1.3.x"), "fabric x 区间排除下一版本")
+    ok(mm.version_satisfies("2.9.0-beta.2", "2.*"), "2.* 通配")
+    ok(mm.version_satisfies("1.2.1-alpha.3", "~1.2"), "fabric ~1.2 含 1.2.x 预发布")
+    ok(not mm.version_satisfies("1.2.0-rc.2", "~1.2"), "fabric ~1.2 排除下界预发布")
+    ok(mm.version_satisfies("1.2.0-rc.2", "~1.2-"), "fabric ~1.2- 包含下界预发布")
+    ok(not mm.version_satisfies("1.3.0", "~1.2"), "fabric ~1.2 排除 1.3")
+    ok(mm.version_satisfies("1.3.0", "^1.2.3"), "fabric ^1.2.3 含同大版本")
+    ok(not mm.version_satisfies("1.2.3-beta.2", "^1.2.3"), "fabric ^1.2.3 排除下界预发布")
+    ok(mm.version_satisfies("0.3.0", "^0.2.3"), "fabric ^0.2.3 含 0.3.0")
 
     print("== 11.10 依赖/冲突图 ==")
     g = mm.ModGraph()
@@ -513,6 +541,21 @@ try:
     g6 = build_graph()
     removed = _mig.resolve_conflicts(g6, _Cfg("skip"))
     ok(removed == [] and os.path.exists(os.path.join(ddir, "a.jar")), "skip 不删除")
+
+    print("== 11.10.6 冲突区间评估（已安装版本）==")
+    g7 = mm.ModGraph()
+    g7.add_mod("techutils", "Technical Utilities", "0.7.1", "t.jar", "PT",
+               [], [("worldedit", "<7.4.4 || >7.4.4")])
+    g7.add_mod("worldedit", "WorldEdit", "7.4.5+7590-b8dc4c1", "w.jar", "PW", [], [])
+    rep7 = g7.conflict_report()
+    ok(len(rep7) == 1 and rep7[0]["mod"] == "worldedit"
+       and rep7[0]["conflicting"] == ["techutils"],
+       "已安装版本落在冲突区间 → 报告: %s" % rep7)
+    g8 = mm.ModGraph()
+    g8.add_mod("techutils", "Technical Utilities", "0.7.1", "t.jar", "PT",
+               [], [("worldedit", "<7.4.4 || >7.4.4")])
+    g8.add_mod("worldedit", "WorldEdit", "7.4.4", "w.jar", "PW", [], [])
+    ok(not g8.conflict_report(), "版本恰好 7.4.4 不在冲突区间 → 不报告")
 
     print("== 11.11 带版本约束的版本挑选 ==")
     import mc_migrator.modrinth as _mr2
