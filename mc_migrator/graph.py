@@ -48,27 +48,26 @@ class ModGraph:
         return out
 
     def conflict_report(self):
-        out = []
-        for mid in sorted(set(self.dependents) & set(self.conflicting)):
-            if mid not in self.mods:
-                continue
-            out.append({"mod": mid,
-                        "name": self.mods[mid].get("name") or mid,
-                        "file": self.mods[mid].get("file"),
-                        "dependents": sorted(self.dependents[mid]),
-                        "conflicting": sorted(self.conflicting[mid])})
-        seen = {item["mod"] for item in out}
+        merged = {}
         for a, reqs in self.conf_reqs.items():
             for b, ranges in reqs.items():
-                if b in seen or b not in self.mods:
+                if b not in self.mods:
                     continue
                 bv = self.mods[b].get("version")
-                if bv and any(version_satisfies(bv, r) for r in ranges):
-                    out.append({"mod": b,
-                                "name": self.mods[b].get("name") or b,
-                                "file": self.mods[b].get("file"),
-                                "dependents": [],
-                                "conflicting": [a]})
+                if not bv or not any(version_satisfies(bv, r) for r in ranges):
+                    continue
+                item = merged.setdefault(b, {"mod": b,
+                                             "name": self.mods[b].get("name") or b,
+                                             "file": self.mods[b].get("file"),
+                                             "dependents": set(self.dependents.get(b, ())),
+                                             "conflicting": set()})
+                item["conflicting"].add(a)
+        out = []
+        for mid in sorted(merged):
+            item = merged[mid]
+            item["dependents"] = sorted(item["dependents"])
+            item["conflicting"] = sorted(item["conflicting"])
+            out.append(item)
         return out
 
     def remove(self, mod_id):
@@ -90,7 +89,7 @@ class ModGraph:
     def summary(self):
         return (len(self.mods),
                 sum(len(v) for v in self.dep_reqs.values()),
-                sum(len(v) for v in self.conf_reqs.values()))
+                len(self.conflict_report()))
 
 
 PRERELEASE_RANK = {"alpha": 1, "beta": 2, "rc": 3}
@@ -137,12 +136,17 @@ def _vkey(version):
     return [int(x) for x in re.findall(r"\d+", core)]
 
 
-def _prerank(version):
+def _pre_parts(version):
     pre = str(version or "").partition("+")[0].partition("-")[2]
     if not pre:
-        return 0
-    m = re.match(r"([a-zA-Z]+)", pre)
-    return PRERELEASE_RANK.get((m.group(1) if m else "").lower(), 4)
+        return None
+    return re.split(r"[.\-_]+", pre)
+
+
+def _part_key(part):
+    if part.isdigit():
+        return (1, int(part))
+    return (2, part)
 
 
 def _vcmp(a, b, b_low_pre=False):
@@ -152,14 +156,20 @@ def _vcmp(a, b, b_low_pre=False):
     nb += [0] * (n - len(nb))
     if na != nb:
         return (na > nb) - (na < nb)
-    pa, pb = _prerank(a), (-1 if b_low_pre else _prerank(b))
-    if pa == pb:
-        return 0
-    if pa == 0:
+    if b_low_pre:
         return 1
-    if pb == 0:
+    pa, pb = _pre_parts(a), _pre_parts(b)
+    if pa is None and pb is None:
+        return 0
+    if pa is None:
+        return 1
+    if pb is None:
         return -1
-    return (pa > pb) - (pa < pb)
+    for x, y in zip(pa, pb):
+        cx, cy = _part_key(x), _part_key(y)
+        if cx != cy:
+            return (cx > cy) - (cx < cy)
+    return (len(pa) > len(pb)) - (len(pa) < len(pb))
 
 
 def _version_cmp(version, c):

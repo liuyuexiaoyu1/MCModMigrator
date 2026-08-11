@@ -24,6 +24,24 @@ def fetch_mc_versions():
     return releases, all_ids
 
 
+_dates_cache = None
+
+
+def mc_release_date(mc_version):
+    global _dates_cache
+    if _dates_cache is None:
+        _dates_cache = {}
+        try:
+            r = requests.get(MANIFEST_URL, headers={"User-Agent": USER_AGENT}, timeout=30)
+            r.raise_for_status()
+            for v in r.json().get("versions", []):
+                if v.get("id") and v.get("releaseTime"):
+                    _dates_cache.setdefault(v["id"], v["releaseTime"])
+        except Exception:
+            pass
+    return _dates_cache.get(mc_version)
+
+
 def base_mc_version(name, known_ids=None):
     name = (name or "").strip()
     if not name:

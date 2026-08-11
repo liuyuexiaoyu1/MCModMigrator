@@ -60,14 +60,34 @@ def _extract_authors(data):
     return [str(x).strip() for x in out if str(x).strip()]
 
 
+def _extract_contact(data):
+    contact = {}
+    for k in ("sources", "issues", "homepage"):
+        v = data.get("contact", {}).get(k)
+        if isinstance(v, list):
+            vals = [str(x) for x in v if str(x).strip()]
+        else:
+            vals = [str(v)] if v else []
+        if vals:
+            contact[k] = vals[0]
+    return contact
+
+
+def _rel_value(val):
+    if isinstance(val, dict):
+        return val.get("version") or "*"
+    if isinstance(val, list):
+        return " || ".join(str(x) for x in val if str(x).strip())
+    return val
+
+
 def _extract_relations(data):
     deps, conflicts = [], []
-    for key, out in (("depends", deps), ("conflicts", conflicts)):
+    for key, out in (("depends", deps), ("conflicts", conflicts), ("breaks", conflicts)):
         rel = data.get(key) or {}
         if isinstance(rel, dict):
             for mid, val in rel.items():
-                rng = val.get("version") if isinstance(val, dict) else val
-                out.append((str(mid), str(rng or "*")))
+                out.append((str(mid), str(_rel_value(val) or "*")))
     return deps, conflicts
 
 
@@ -86,6 +106,7 @@ def _parse_from_zip(z):
                 "kind": "fabric", "library": False,
                 "entrypoints": bool(data.get("entrypoints")),
                 "authors": _extract_authors(data),
+                "contact": _extract_contact(data),
                 "deps": deps, "conflicts": conflicts}
 
     if "quilt.mod.json" in names:
@@ -100,6 +121,7 @@ def _parse_from_zip(z):
                 "kind": "quilt", "library": False,
                 "entrypoints": bool(data.get("entrypoints")),
                 "authors": _extract_authors(data),
+                "contact": _extract_contact(data),
                 "deps": deps, "conflicts": conflicts}
 
     for toml_name, kind in (("META-INF/neoforge.mods.toml", "neoforge"),

@@ -339,7 +339,8 @@ try:
 
     print("== 11. 下载源游戏版本最新版解包比对作者 ==")
     import mc_migrator.modrinth as _mr
-    _saved = (_mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.mr_download_file)
+    _saved = (_mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.mr_download_file,
+              _mr.resolve_via_github)
 
     cdir = os.path.join(tmp, "cmp_dir")
     os.makedirs(cdir, exist_ok=True)
@@ -384,6 +385,7 @@ try:
     _mr.mr_search = fake_search
     _mr.mr_versions = fake_versions
     _mr.mr_download_file = fake_download
+    _mr.resolve_via_github = lambda *a, **k: None
     _mr._versions_cache.clear()
     try:
         pid, conf, why, _mf = _mr.match_to_project(
@@ -425,18 +427,199 @@ try:
             "1.20.1", "fabric", vmatch_jar)
         ok(pid == "P1", "无 compare_dir → 跳过作者下载校验: %s" % why)
     finally:
-        _mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.mr_download_file = _saved
+        (_mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions, _mr.mr_download_file,
+         _mr.resolve_via_github) = _saved
+
+    print("== 11.9 fork 版 GitHub release 兜底 ==")
+    _gh_saved = (_mr.mr_get, _mr._gh_releases, _mr.mc_release_date, _mr.mr_download_file,
+                 _mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions)
+    _mr.mr_lookup_sha1 = fake_sha1
+    _mr.mr_search = fake_search
+    _mr.mr_versions = fake_versions
+    _mr.mc_release_date = lambda v: "2026-01-15T00:00:00Z"
+
+    def gh_download(file_info, dest_dir):
+        if "version_number" in file_info:
+            vn = file_info["version_number"]
+            p = os.path.join(dest_dir, "official-" + vn + ".jar")
+            make_jar(p, {"fabric.mod.json": json.dumps(
+                {"id": "somemod", "name": "SomeMod", "version": "1.5.0",
+                 "authors": ["Alice", "Bob"]})})
+            return p, None
+        fn = file_info["files"][0]["filename"]
+        p = os.path.join(dest_dir, fn)
+        if "src" in fn:
+            make_jar(p, {"fabric.mod.json": json.dumps(
+                {"id": "gugle", "name": "Gugle", "version": "2.0.0",
+                 "authors": ["EvilForker"], "depends": {"minecraft": ">=1.20 <=1.21"}}),
+                "com/example/Mod.java": "class Mod {}"})
+            return p, None
+        if "26.2" in fn:
+            mc_dep = "26.2"
+        elif "1.21" in fn:
+            mc_dep = ">=1.21"
+        else:
+            mc_dep = ">=1.20 <=1.21"
+        make_jar(p, {"fabric.mod.json": json.dumps(
+            {"id": "gugle", "name": "Gugle", "version": "2.0.0",
+             "authors": ["EvilForker"], "depends": {"minecraft": mc_dep}})})
+        return p, None
+
+    _mr.mr_download_file = gh_download
+
+    def gh_release(tag, assets, pub="2026-07-01T00:00:00Z", title="", body=""):
+        return {"tag_name": tag, "name": title, "body": body, "published_at": pub,
+                "assets": [{"name": n,
+                            "browser_download_url": "https://github.com/x/y/releases/download/%s/%s" % (tag, n)}
+                           for n in assets]}
+
+    gh_jar = os.path.join(tmp, "ghfork.jar")
+    make_jar(gh_jar, {"fabric.mod.json": json.dumps({
+        "id": "somemod", "name": "SomeMod", "version": "1.4.0",
+        "authors": ["EvilForker"],
+        "contact": {"sources": "https://github.com/evil/somemod-fork"}})})
+    gh_meta = {"id": "somemod", "name": "SomeMod", "version": "1.4.0",
+               "authors": ["EvilForker"],
+               "contact": {"sources": "https://github.com/evil/somemod-fork"}}
+
+    _mr._gh_releases = lambda repo: [gh_release("v2", ["gugle-1.21.jar", "gugle-1.20.1.jar"])]
+    _mr._versions_cache.clear()
+    pid, conf, why, mf = _mr.match_to_project(gh_meta, "1.20.1", "fabric", gh_jar,
+                                              src_mc_version="1.20.1", compare_dir=cdir)
+    ok(pid == "github:evil/somemod-fork" and conf == 1.0
+       and mf and os.path.basename(mf) == "gugle-1.20.1.jar" and "GitHub" in why,
+       "fork 版经 GitHub release 兜底下载并验证适配: %s" % why)
+
+    _mr._gh_releases = lambda repo: [gh_release("v1", ["gugle-1.20.1.jar"],
+                                                pub="2025-06-01T00:00:00Z")]
+    _mr._versions_cache.clear()
+    pid, conf, why, mf = _mr.match_to_project(gh_meta, "1.20.1", "fabric", gh_jar,
+                                              src_mc_version="1.20.1", compare_dir=cdir)
+    ok(pid is None and "疑似 fork" in why and mf is None,
+       "release 发布于 MC 版本发布之前 → 不采用仍拒绝: %s" % why)
+
+    _mr._gh_releases = lambda repo: [gh_release("v4", ["gugle-latest.jar"])]
+    _mr._versions_cache.clear()
+    pid, conf, why, mf = _mr.match_to_project(gh_meta, "1.20.1", "fabric", gh_jar,
+                                              src_mc_version="1.20.1", compare_dir=cdir)
+    ok(pid == "github:evil/somemod-fork" and "仅含一个 jar 文件" in why
+       and mf and os.path.basename(mf) == "gugle-latest.jar",
+       "release 仅一个 jar → 直接下载并解包验证: %s" % why)
+
+    _mr._gh_releases = lambda repo: [gh_release("v5", ["gugle-1.21.jar"])]
+    _mr._versions_cache.clear()
+    pid, conf, why, mf = _mr.match_to_project(gh_meta, "1.20.1", "fabric", gh_jar,
+                                              src_mc_version="1.20.1", compare_dir=cdir)
+    ok(pid is None and "疑似 fork" in why and mf is None,
+       "下载解包后不适配目标版本 → 拒绝: %s" % why)
+
+    _mr.mr_versions = lambda *a, **k: []
+    _mr._gh_releases = lambda repo: [gh_release("v12", ["subtick-mc26.2-v2.4.jar"])]
+    _mr._versions_cache.clear()
+    pid, conf, why, mf = _mr.match_to_project(gh_meta, "26.2", "fabric", gh_jar,
+                                              src_mc_version="1.21", compare_dir=cdir)
+    ok(pid == "github:evil/somemod-fork" and conf == 1.0 and mf is not None,
+       "项目无源版本可校验作者（cand=None）仍走 GitHub 兜底: %s" % why)
+    _mr.mr_versions = fake_versions
+
+    _mr._gh_releases = lambda repo: [gh_release("v11", ["gugle-src.jar"])]
+    _mr._versions_cache.clear()
+    pid, conf, why, mf = _mr.match_to_project(gh_meta, "1.20.1", "fabric", gh_jar,
+                                              src_mc_version="1.20.1", compare_dir=cdir)
+    ok(pid is None and "疑似 fork" in why and mf is None,
+       "仅含源码的 jar（无 class 文件）→ 拒绝: %s" % why)
+
+    rel_multi = gh_release("v6", ["gugle-mc1.20.1.jar", "gugle-mc1.21.jar"])
+    a, why6 = _mr._pick_gh_asset(rel_multi, "1.20.1")
+    ok(a and a["name"] == "gugle-mc1.20.1.jar" and "文件包含目标版本" in why6,
+       "多 jar 按文件名包含目标版本选择: %s" % why6)
+    rel_src = gh_release("v10", ["gugle-1.20.1-sources.jar", "gugle-1.20.1.jar"])
+    a, why10 = _mr._pick_gh_asset(rel_src, "1.20.1")
+    ok(a and a["name"] == "gugle-1.20.1.jar" and not a["name"].endswith("sources.jar"),
+       "多 jar 时排除 -sources 源码包（%s）: %s" % (a and a["name"], why10))
+    rel_body = gh_release("v7", ["gugle-a.jar", "gugle-b.jar"], title="", body="支持 1.20.1")
+    a, why7 = _mr._pick_gh_asset(rel_body, "1.20.1")
+    ok(a and a["name"] == "gugle-a.jar" and "标题/说明" in why7,
+       "多 jar 时按 release 标题/说明包含目标版本选择: %s" % why7)
+    rel_none = gh_release("v8", ["gugle-a.jar", "gugle-b.jar"])
+    ok(_mr._pick_gh_asset(rel_none, "1.20.1")[0] is None,
+       "多 jar 且无目标版本信息 → 不选")
+    rel_single = gh_release("v9", ["gugle-one.jar"])
+    a, why9 = _mr._pick_gh_asset(rel_single, "1.20.1")
+    ok(a and a["name"] == "gugle-one.jar" and "仅含一个 jar" in why9,
+       "单 jar 规则: %s" % why9)
+
+    ok(_mr._github_repo({"contact": {"issues": "https://github.com/a/b/issues"}}, None) == "a/b",
+       "contact.issues 识别仓库 a/b")
+    ok(_mr._github_repo({"contact": {"sources": "https://github.com/a/repo.git"}}, None) == "a/repo",
+       "sources 识别仓库（去除 .git）")
+    _mr.mr_get = lambda p: {"id": p, "source_url": "https://github.com/forkowner/forkrepo"}
+    ok(_mr._github_repo({"id": "x"}, "P9") == "forkowner/forkrepo",
+       "无 contact 时回退匹配项目的 source_url")
+    _mr.mr_get = lambda p: {"id": p}
+    ok(_mr._github_repo({"id": "x"}, "P9") is None, "项目无 source_url → 无仓库")
+    ok(_mr._github_repo({"id": "x"}, None) is None, "无任何线索 → 无仓库")
+
+    class _FakeResp:
+        def __init__(self, text, status=200):
+            self.text = text
+            self.status_code = status
+
+        def raise_for_status(self):
+            if self.status_code != 200:
+                raise ValueError("bad status")
+
+    _get_saved = _mr._SESSION.get
+    _mr._SESSION.get = lambda url, **kw: (
+        _FakeResp("<feed><entry><id>tag:github.com,2008:Repository/1/v2.0</id>"
+                  "<title>v2.0: fix</title><updated>2026-07-01T00:00:00Z</updated></entry>"
+                  "<entry><id>tag:github.com,2008:Repository/1/v1.0</id>"
+                  "<title>v1.0</title><updated>2026-06-01T00:00:00Z</updated></entry></feed>")
+        if "releases.atom" in url
+        else (_FakeResp('<a href="/o/r/releases/download/v2.0/mod-1.20.1.jar">m</a>'
+                        '<a href="/o/r/releases/download/v2.0/mod-1.21.jar">m</a>')
+              if url.endswith("v2.0")
+              else _FakeResp('<a href="/o/r/releases/download/v1.0/mod-1.20.1.jar">m</a>'
+                             '<a href="/o/r/releases/download/v1.0/readme.txt">m</a>')))
+    rels = _mr._gh_releases_html("o/r")
+    ok(len(rels) == 2 and rels[0]["tag_name"] == "v2.0"
+       and rels[0]["published_at"] == "2026-07-01T00:00:00Z"
+       and [a["name"] for a in rels[0]["assets"]] == ["mod-1.20.1.jar", "mod-1.21.jar"]
+       and rels[1]["assets"][0]["browser_download_url"]
+       == "https://github.com/o/r/releases/download/v1.0/mod-1.20.1.jar",
+       "HTML 兜底解析 release 列表（tag 取自 id、日期、仅 jar 资源）")
+    _mr._SESSION.get = _get_saved
+    (_mr.mr_get, _mr._gh_releases, _mr.mc_release_date, _mr.mr_download_file,
+     _mr.mr_lookup_sha1, _mr.mr_search, _mr.mr_versions) = _gh_saved
 
     print("== 11.8 依赖/冲突解析 ==")
     rel = os.path.join(tmp, "relations.jar")
     make_jar(rel, {"fabric.mod.json": json.dumps({
         "id": "amod", "name": "AMod", "version": "1.0",
         "depends": {"bmod": ">=1.0", "minecraft": "1.20.1", "fabricloader": "*"},
-        "conflicts": {"cmod": "<2.0"}})})
+        "conflicts": {"cmod": "<2.0"},
+        "breaks": {"dmod": "<=1.5", "emod": "*"}})})
     m = mm.parse_mod_jar(rel)
     ok(("bmod", ">=1.0") in m["deps"] and ("minecraft", "1.20.1") in m["deps"],
        "fabric depends 解析: %s" % m["deps"])
     ok(("cmod", "<2.0") in m["conflicts"], "fabric conflicts 解析: %s" % m["conflicts"])
+    ok(("dmod", "<=1.5") in m["conflicts"] and ("emod", "*") in m["conflicts"],
+       "fabric breaks 字段并入冲突: %s" % m["conflicts"])
+    rel2 = os.path.join(tmp, "relations_list.jar")
+    make_jar(rel2, {"fabric.mod.json": json.dumps({
+        "id": "iris", "name": "Iris", "version": "1.11.2+mc26.2",
+        "depends": {"sodium": ["0.9.x"], "minecraft": "~26.2"}})})
+    m2 = mm.parse_mod_jar(rel2)
+    ok(("sodium", "0.9.x") in m2["deps"], "depends 数组值解析: %s" % m2["deps"])
+    g9 = mm.ModGraph()
+    g9.add_mod("iris", "Iris", "1.11.2+mc26.2", "iris.jar", "PI",
+               m2["deps"], m2["conflicts"])
+    g9.add_mod("sodium", "Sodium", "0.9.2-alpha.4+mc26.2", "sodium.jar", "PS",
+               [], [("iris", "<=1.11.2")])
+    ok(g9.dependents.get("sodium") == {"iris"}, "iris 依赖 sodium（0.9.x）")
+    rep9 = g9.conflict_report()
+    ok(len(rep9) == 1 and rep9[0]["mod"] == "iris" and "sodium" in rep9[0]["conflicting"],
+       "sodium breaks iris<=1.11.2 → 冲突识别: %s" % rep9)
     toml_rel = os.path.join(tmp, "toml_rel.jar")
     make_jar(toml_rel, {"META-INF/mods.toml":
                         'modLoader="javafml"\n[[mods]]\nmodId="xmod"\ndisplayName="XMod"\n'
@@ -484,6 +667,14 @@ try:
     ok(mm.version_satisfies("1.3.0", "^1.2.3"), "fabric ^1.2.3 含同大版本")
     ok(not mm.version_satisfies("1.2.3-beta.2", "^1.2.3"), "fabric ^1.2.3 排除下界预发布")
     ok(mm.version_satisfies("0.3.0", "^0.2.3"), "fabric ^0.2.3 含 0.3.0")
+    ok(not mm.version_satisfies("1.21-4.6", "<=1.21-4.5"), "预发布逐段比较：4.6 > 4.5 不命中")
+    ok(mm.version_satisfies("1.21-4.5", "<=1.21-4.5"), "预发布逐段比较：4.5 命中")
+    ok(mm.version_satisfies("0.3.1-beta.9", ">=0.3.1-beta.8.d.10"),
+       "预发布逐段比较：beta.9 > beta.8.d.10")
+    ok(not mm.version_satisfies("0.3.1-beta.8.8", ">=0.3.1-beta.8.d.10"),
+       "预发布逐段比较：数字 8 < 字母 d")
+    ok(not mm.version_satisfies("0.3.1-beta.8.d", ">=0.3.1-beta.8.d.10"),
+       "预发布逐段比较：短前缀不满足")
 
     print("== 11.10 依赖/冲突图 ==")
     g = mm.ModGraph()
@@ -556,6 +747,122 @@ try:
                [], [("worldedit", "<7.4.4 || >7.4.4")])
     g8.add_mod("worldedit", "WorldEdit", "7.4.4", "w.jar", "PW", [], [])
     ok(not g8.conflict_report(), "版本恰好 7.4.4 不在冲突区间 → 不报告")
+    g9 = mm.ModGraph()
+    g9.add_mod("a", "A", "1.0", "a.jar", "PA", [], [("x", "*")])
+    g9.add_mod("b", "B", "1.0", "b.jar", "PB", [], [("x", "*")])
+    g9.add_mod("c", "C", "1.0", "c.jar", "PC", [], [("x", ">9")])
+    g9.add_mod("x", "X", "2.0", "x.jar", "PX", [], [])
+    rep9 = g9.conflict_report()
+    ok(len(rep9) == 1 and rep9[0]["mod"] == "x"
+       and rep9[0]["conflicting"] == ["a", "b"],
+       "同一目标多模组冲突合并为一条: %s" % rep9)
+
+    print("== 11.10.7 单方面冲突自动换版本 ==")
+    import mc_migrator.migrator as _mig3
+    _saved3 = (_mig3.mr_versions, _mig3.mr_download_file)
+    tdir3 = os.path.join(tmp, "auto_dir")
+    os.makedirs(tdir3, exist_ok=True)
+    old_file = os.path.join(tdir3, "worldedit-7.4.5.jar")
+    open(old_file, "w").write("old")
+    g10 = mm.ModGraph()
+    g10.add_mod("techutils", "Technical Utilities", "0.7.1", "t.jar", "PT",
+                [], [("worldedit", ">7.4.4 || <7.4.4")])
+    g10.add_mod("worldedit", "WorldEdit", "7.4.5", old_file, "PW", [], [])
+
+    def fake_versions(pid, mc=None, loader=None):
+        return [
+            {"id": "v3", "version_number": "7.4.5", "date_published": "2026-03-01",
+             "game_versions": ["1.20.1"], "loaders": ["fabric"]},
+            {"id": "v2", "version_number": "7.4.4", "date_published": "2026-02-01",
+             "game_versions": ["1.20.1"], "loaders": ["fabric"]},
+        ]
+
+    def fake_download(file_info, dest_dir):
+        vn = file_info["version_number"]
+        p = os.path.join(tdir3, "worldedit-" + vn + ".jar")
+        make_jar(p, {"fabric.mod.json": json.dumps(
+            {"id": "worldedit", "name": "WorldEdit", "version": vn})})
+        return p, None
+
+    _mig3.mr_versions = fake_versions
+    _mig3.mr_download_file = fake_download
+
+    class _ACfg:
+        log = mm.Logger(lambda m, l="info": None)
+        confirm = lambda p: True
+
+    try:
+        rep10 = {"ok": [("WorldEdit", "worldedit-7.4.5.jar")]}
+        _mig3.auto_resolve_conflicts(g10, "1.20.1", "fabric", tdir3, _ACfg(), rep10)
+        ok(g10.mods["worldedit"]["version"] == "7.4.4"
+           and not os.path.exists(old_file)
+           and os.path.exists(os.path.join(tdir3, "worldedit-7.4.4.jar"))
+           and any(f == "worldedit-7.4.4.jar" for _n, f in rep10["ok"]),
+           "单方面冲突自动换成不冲突版本: %s" % g10.mods["worldedit"]["version"])
+        ok(_mig3.resolve_conflicts(g10, _ACfg()) == [],
+           "无人依赖目标 → 不弹窗: %s" % g10.conflict_report())
+    finally:
+        _mig3.mr_versions, _mig3.mr_download_file = _saved3
+
+    print("== 11.10.8 目标无解时换成兼容的 breaker（sodium/iris 场景）==")
+    import mc_migrator.migrator as _mig4
+    _saved4 = (_mig4.mr_versions, _mig4.mr_download_file)
+    tdir4 = os.path.join(tmp, "breaker_dir")
+    os.makedirs(tdir4, exist_ok=True)
+    sodium_file = os.path.join(tdir4, "sodium-a4.jar")
+    open(sodium_file, "w").write("old")
+    iris_file = os.path.join(tdir4, "iris-1.11.2.jar")
+    open(iris_file, "w").write("iris")
+    fapi_file = os.path.join(tdir4, "fabric-api.jar")
+    open(fapi_file, "w").write("fapi")
+    g11 = mm.ModGraph()
+    g11.add_mod("iris", "Iris", "1.11.2+mc26.2", iris_file, "PIRIS", [("sodium", "0.9.x")], [])
+    g11.add_mod("fabric-api", "Fabric API", "0.116.0", fapi_file, "PFAPI", [], [])
+    g11.add_mod("sodium", "Sodium", "0.9.2-alpha.4+mc26.2", sodium_file, "PSODIUM",
+                [], [("iris", "<=1.11.2"), ("fabric-api", "<0.145.1")])
+
+    def fv(pid, mc=None, loader=None):
+        if pid == "PIRIS":
+            return [{"id": "v1", "version_number": "1.11.2+mc26.2", "date_published": "2026-07-08",
+                     "game_versions": ["26.2"], "loaders": ["fabric"]}]
+        if pid == "PFAPI":
+            return []
+        return [
+            {"id": "v4", "version_number": "0.9.2-alpha.4+mc26.2", "date_published": "2026-08-07",
+             "game_versions": ["26.2"], "loaders": ["fabric"]},
+            {"id": "v3", "version_number": "0.9.1+mc26.2", "date_published": "2026-07-08",
+             "game_versions": ["26.2"], "loaders": ["fabric"]},
+        ]
+
+    def fd(file_info, dest_dir):
+        vn = file_info["version_number"]
+        meta = {"id": "sodium" if "sodium" in str(file_info.get("project_id")) else "iris",
+                "name": "Sodium", "version": vn, "authors": ["JellySquid"]}
+        if "0.9.1" in vn:
+            meta["breaks"] = {"iris": "<=1.11.1", "fabric-api": "<0.145.1"}
+        elif "0.9.2" in vn:
+            meta["breaks"] = {"iris": "<=1.11.2", "fabric-api": "<0.145.1"}
+        p = os.path.join(tdir4, "dl-" + vn + ".jar")
+        make_jar(p, {"fabric.mod.json": json.dumps(meta)})
+        return p, None
+
+    _mig4.mr_versions = fv
+    _mig4.mr_download_file = fd
+    try:
+        rep11 = {"ok": [("Sodium", "sodium-a4.jar"), ("Iris", "iris-1.11.2.jar")]}
+        _mig4.auto_resolve_conflicts(g11, "26.2", "fabric", tdir4, _ACfg(), rep11)
+        ok(g11.mods["sodium"]["version"] == "0.9.1+mc26.2"
+           and g11.mods["iris"]["version"] == "1.11.2+mc26.2"
+           and not os.path.exists(sodium_file)
+           and os.path.exists(iris_file),
+           "目标无解时 breaker 换成兼容版本（既有 fabric-api break 不拦路）: %s"
+           % g11.mods["sodium"]["version"])
+        ok("iris" not in [r["mod"] for r in g11.conflict_report()],
+           "iris/sodium 冲突消解: %s" % g11.conflict_report())
+        ok(any(f == "dl-0.9.1+mc26.2.jar" for _n, f in rep11["ok"]),
+           "报告文件已更新: %s" % rep11["ok"])
+    finally:
+        _mig4.mr_versions, _mig4.mr_download_file = _saved4
 
     print("== 11.11 带版本约束的版本挑选 ==")
     import mc_migrator.modrinth as _mr2
@@ -608,6 +915,7 @@ try:
             self.choices = {"config": True, "options": True, "saves": True,
                             "stray": True, "optional": True, "server": False}
             self.pending_big = []
+            self.migrated_dirs = []
 
     try:
         bcfg = _BigCfg()

@@ -10,7 +10,7 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import mc_migrator as mm  # noqa: E402
+import mc_migrator as mm
 
 PASS = 0
 
@@ -129,6 +129,10 @@ try:
     ok(win.data_checks["server"].isHidden(), "C2C 下隐藏『服务端文件』数据类别")
     ok(not win.data_checks["options"].isHidden(), "C2C 下显示 options.txt 类别")
 
+    ok(hasattr(win, "clear_log_btn"), "有『清空日志』按钮")
+    win._render_log("测试日志内容")
+    win.clear_log_btn.click()
+    ok("测试日志内容" not in win.log_view.toPlainText(), "清空日志按钮生效")
     ok("正在拉取" in win.mc_status_label.text(), "版本列表未就绪时显示『正在拉取』")
     ok(win.mods_chk.isChecked() and not hasattr(win, "data_master_chk"),
        "总开关改为『迁移mod』且默认勾选")

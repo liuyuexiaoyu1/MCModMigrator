@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -11,8 +12,10 @@ from .core import (ASK_CONF, CHOICE_KEYS, HIGH_CONF, KNOWN_DIRS, KNOWN_FILES,
 from .clients import client_paths, detect_loader, is_server_root, sniff_server_loader
 from .mod_parser import parse_mod_jar
 from .modrinth import (Downloader, collect_deps, configure_http,
-                       match_to_project, mr_download_file, pick_version,
-                       pick_version_in_range, primary_filename)
+                       match_to_project, mr_download_file, mr_versions,
+                       pick_version, pick_version_in_range, primary_filename,
+                       ver_compatible)
+from .graph import version_satisfies
 
 
 def _make_dep_logger(base, report):
@@ -39,6 +42,7 @@ class RunConfig:
         self.migrate_mods = migrate_mods
         self.on_conflicts = None
         self.pending_big = []
+        self.migrated_dirs = []
         self.choices = choices or {k: True for k in CHOICE_KEYS}
         self.log = log or Logger(plain_log_sink)
         self.confirm = confirm or (lambda p: True)
@@ -58,6 +62,8 @@ def _match_one(i, jname, meta, jpath, mc_version, src_mc_version, loader, cfg, s
     if reason and "已按选项忽略" in reason:
         cfg.log.warn(reason)
     if reason and "mcmod.cn" in reason:
+        cfg.log.info(reason)
+    if isinstance(project_id, str) and project_id.startswith("github:"):
         cfg.log.info(reason)
     if project_id is None:
         return ("manual", jname, meta, reason or "未找到匹配")
@@ -86,7 +92,7 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
         cfg.log.warn("源 mods 目录中没有 jar 文件: %s" % src_mods_dir)
         return
 
-    downloader = Downloader(max_workers=cfg.download_threads)
+    downloader = Downloader(max_workers=cfg.download_threads, log=cfg.log)
     downloaded_projects = set()
     matched_items = []
     n_total = len(jars)
@@ -135,7 +141,8 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
         if kind == "manual":
             jname, meta, reason = out[1], out[2], out[3]
             report["manual"].append((jname, meta, reason))
-            cfg.log.warn("%s，已记入手动清单" % reason)
+            cfg.log.warn("%s（%s），已记入手动清单"
+                         % (meta.get("name") or meta.get("id") or jname, reason))
             continue
         if kind == "matched":
             jname, meta, project_id, matched_file = out[1:]
@@ -187,21 +194,15 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
     downloader.shutdown(wait=True)
     for label, kind, extra, dest, err in results:
         if dest:
-            size = human_size(os.path.getsize(dest)) if os.path.exists(dest) else "?"
             if kind == "mod":
                 jname, meta, pid = extra
                 report["ok"].append((label, os.path.basename(dest)))
-                cfg.log.info("已下载: %s (%s)" % (os.path.basename(dest), size))
             else:
                 report["deps"].append("依赖 %s -> %s" % (label, os.path.basename(dest)))
-                cfg.log.info("依赖 %s -> %s (%s)" % (label, os.path.basename(dest), size))
         else:
             if kind == "mod":
                 jname, meta, pid = extra
                 report["manual"].append((jname, meta, "下载失败: %s" % err))
-                cfg.log.error("下载失败: %s" % err)
-            else:
-                cfg.log.error("依赖 %s 下载失败: %s" % (label, err))
 
     if graph:
         cfg.log.info("全部下载完成，正在解包并构建依赖图 ...")
@@ -243,8 +244,141 @@ def _pin_dependency_versions(graph, mc_version, loader, target_mods_dir, cfg, re
                        [(binfo.get("name") or b, os.path.basename(dest))]
 
 
+def _parse_probe(v, target_mods_dir):
+    dest, err = mr_download_file(v, target_mods_dir)
+    if not dest:
+        return None, err
+    cm = parse_mod_jar(dest)
+    try:
+        os.remove(dest)
+    except OSError:
+        pass
+    if not cm:
+        return None, "解析失败"
+    return cm, None
+
+
+def _replace_version(binfo, candidates, ranges, target_mods_dir, cfg, note, report):
+    for v in candidates:
+        cm, err = _parse_probe(v, target_mods_dir)
+        if not cm:
+            continue
+        jver = cm.get("version") or ""
+        if jver == binfo.get("version"):
+            continue
+        if any(version_satisfies(jver, r) for r in ranges):
+            continue
+        dest, err2 = mr_download_file(v, target_mods_dir)
+        if not dest:
+            continue
+        old = binfo.get("file")
+        if old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(dest):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        binfo["file"] = dest
+        binfo["version"] = jver
+        report["ok"] = [(n, f) for n, f in report["ok"] if f != os.path.basename(old)] + \
+                       [(binfo.get("name") or "mod", os.path.basename(dest))]
+        cfg.log.info("%s 与 %s 冲突，已更换为不冲突版本 %s" % (binfo.get("name") or "mod", note, jver))
+        return True
+    return False
+
+
+def _compatible_versions(pid, mc_version, loader):
+    vs = mr_versions(pid, mc_version, loader)
+    if not vs:
+        vs = mr_versions(pid)
+    return [v for v in vs
+            if (mc_version in v.get("game_versions", [])
+                or any(ver_compatible(g, mc_version) for g in v.get("game_versions", [])))
+            and (not loader or loader in v.get("loaders", []))]
+
+
+def auto_resolve_conflicts(graph, mc_version, loader, target_mods_dir, cfg, report):
+    for item in graph.conflict_report():
+        if item["dependents"]:
+            continue
+        b = item["mod"]
+        ranges = set()
+        for reqs in graph.conf_reqs.values():
+            if b in reqs:
+                ranges |= reqs[b]
+        if not ranges:
+            continue
+        binfo = graph.mods.get(b)
+        if not binfo or not binfo.get("project_id"):
+            continue
+        if _replace_version(binfo, _compatible_versions(binfo["project_id"], mc_version, loader),
+                            ranges, target_mods_dir, cfg, "、".join(item["conflicting"]), report):
+            continue
+        if not _replace_breaker(item, graph, mc_version, loader, target_mods_dir, cfg, report):
+            cfg.log.warn("%s 与 %s 冲突，且找不到不冲突的版本"
+                         % (b, "、".join(item["conflicting"])))
+
+
+def _replace_breaker(item, graph, mc_version, loader, target_mods_dir, cfg, report):
+    b = item["mod"]
+    bv = graph.mods[b].get("version") or ""
+    for a in item["conflicting"]:
+        ainfo = graph.mods.get(a)
+        if not ainfo or not ainfo.get("project_id"):
+            continue
+        reqs = graph.requirements_for(a)
+        probed = 0
+        for v in _compatible_versions(ainfo["project_id"], mc_version, loader):
+            if probed >= 10:
+                break
+            probed += 1
+            cm, err = _parse_probe(v, target_mods_dir)
+            if not cm:
+                continue
+            jver = cm.get("version") or ""
+            if jver == ainfo.get("version"):
+                continue
+            if reqs and not all(version_satisfies(jver, r) for r in reqs):
+                continue
+            cbreaks = dict((t, r) for t, r in cm.get("conflicts", []))
+            if b in cbreaks and version_satisfies(bv, cbreaks[b]):
+                continue
+            existing_targets = set(graph.conf_reqs.get(a, {}).keys())
+            new_break = False
+            for t, r in cbreaks.items():
+                tv = graph.mods.get(t, {}).get("version")
+                if tv and version_satisfies(tv, r) and t not in existing_targets:
+                    new_break = True
+                    break
+            if new_break:
+                continue
+            final, err2 = mr_download_file(v, target_mods_dir)
+            if not final:
+                continue
+            old = ainfo.get("file")
+            if old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(final):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+            ainfo["file"] = final
+            ainfo["version"] = v.get("version_number") or ""
+            report["ok"] = [(n, f) for n, f in report["ok"] if f != os.path.basename(old)] + \
+                           [(ainfo.get("name") or a, os.path.basename(final))]
+            graph.conf_reqs[a] = {}
+            for t, r in cm.get("conflicts", []):
+                graph.conf_reqs[a].setdefault(t, set()).add(r)
+            graph.conflicting = {}
+            for src, reqs in graph.conf_reqs.items():
+                for t in reqs:
+                    graph.conflicting.setdefault(t, set()).add(src)
+            cfg.log.info("%s 与 %s 冲突，已将 %s 换成不冲突版本 %s"
+                         % (a, b, a, v.get("version_number")))
+            return True
+    return False
+
+
 def resolve_conflicts(graph, cfg):
-    conflicts = graph.conflict_report()
+    conflicts = [item for item in graph.conflict_report() if item["dependents"]]
     if not conflicts:
         return []
     if cfg.on_conflicts:
@@ -383,6 +517,7 @@ def migrate_game_data(src_root, dst_root, cfg):
             if not _defer_or_copy("config", sc, os.path.join(dst_root, "config"), "overwrite"):
                 cfg.log.info("正在迁移 config 目录 (%s) ..." % human_size(dir_size(sc)))
                 copy_tree_overwrite(sc, os.path.join(dst_root, "config"), cfg.log)
+                cfg.migrated_dirs.append(("config", sc, os.path.join(dst_root, "config")))
         else:
             cfg.log.info("源目录没有 config，跳过")
     if choices.get("options"):
@@ -390,6 +525,7 @@ def migrate_game_data(src_root, dst_root, cfg):
         if os.path.exists(so):
             shutil.copy2(so, os.path.join(dst_root, "options.txt"))
             cfg.log.info("options.txt 已复制")
+            cfg.migrated_dirs.append(("options.txt", so, os.path.join(dst_root, "options.txt")))
         else:
             cfg.log.info("源目录没有 options.txt，跳过")
     if choices.get("saves"):
@@ -400,6 +536,7 @@ def migrate_game_data(src_root, dst_root, cfg):
                 cfg.log.info("正在迁移 %s (%s)，重名自动加 _old ..." % (sdir, human_size(dir_size(ss))))
                 n, r = copy_saves_merge(ss, os.path.join(dst_root, sdir), cfg.log)
                 cfg.log.info("%s 迁移完成：复制 %d 项，重名改名 %d 项（已加 _old）" % (sdir, n, r))
+                cfg.migrated_dirs.append((sdir, ss, os.path.join(dst_root, sdir)))
         else:
             cfg.log.info("源目录没有 %s，跳过" % sdir)
     if choices.get("stray"):
@@ -416,9 +553,11 @@ def migrate_game_data(src_root, dst_root, cfg):
                     continue
                 n = copy_tree_missing(s, dst)
                 cfg.log.info("%s/ 已迁移（新复制 %d 个文件）" % (d, n))
+                cfg.migrated_dirs.append((d, s, dst))
             for f in stray_files:
                 shutil.copy2(os.path.join(src_root, f), os.path.join(dst_root, f))
                 cfg.log.info("%s 已复制" % f)
+                cfg.migrated_dirs.append((f, os.path.join(src_root, f), os.path.join(dst_root, f)))
         else:
             cfg.log.info("没有发现模组生成的杂项目录")
     if choices.get("optional"):
@@ -428,9 +567,11 @@ def migrate_game_data(src_root, dst_root, cfg):
             for d in opt_dirs:
                 copy_tree_missing(os.path.join(src_root, d), os.path.join(dst_root, d))
                 cfg.log.info("%s/ 已迁移" % d)
+                cfg.migrated_dirs.append((d, os.path.join(src_root, d), os.path.join(dst_root, d)))
             for f in opt_files:
                 shutil.copy2(os.path.join(src_root, f), os.path.join(dst_root, f))
                 cfg.log.info("%s 已复制" % f)
+                cfg.migrated_dirs.append((f, os.path.join(src_root, f), os.path.join(dst_root, f)))
         else:
             cfg.log.info("源目录没有资源包/光影/servers.dat，跳过")
     if server_mode and choices.get("server"):
@@ -440,6 +581,7 @@ def migrate_game_data(src_root, dst_root, cfg):
             if os.path.exists(s):
                 shutil.copy2(s, d)
                 cfg.log.info("%s 已复制" % fn)
+                cfg.migrated_dirs.append(("服务端文件: " + fn, s, d))
                 copied = True
         if not copied:
             cfg.log.info("源服务端没有服务端专属文件，跳过")
@@ -464,13 +606,25 @@ def migrate_big_folders(cfg):
         else:
             n = copy_tree_missing(src, dst)
             cfg.log.info("%s 迁移完成：新复制 %d 个文件" % (label, n))
+        cfg.migrated_dirs.append((label, src, dst))
     cfg.pending_big = []
 
+def _fmt_dur(s):
+    if s < 60:
+        return "%.1f 秒" % s
+    return "%d 分 %.0f 秒" % (int(s // 60), s % 60)
+
+
 def run_migration(params, cfg):
+    _t0 = time.monotonic()
     stop_event = params.get("stop_event")
     mc_root, src_version = params["src_root"], params["src_version"]
     t_root, t_version = params["target_root"], params["target_version"]
     t_loader, t_mc = params["target_loader"], params["target_mc"]
+
+    log_lines = []
+    orig_log = cfg.log
+    cfg.log = Logger(lambda m, l="info": (getattr(orig_log, l)(m), log_lines.append(m)))
 
     PROXY_SETTINGS["use_system"] = cfg.use_system_proxy
     configure_http(cfg.log)
@@ -545,12 +699,25 @@ def run_migration(params, cfg):
     if graph.mods:
         n_mods, n_deps, n_confs = graph.summary()
         cfg.log.info("依赖图统计: %d 个模组, %d 条依赖, %d 条冲突" % (n_mods, n_deps, n_confs))
+        auto_resolve_conflicts(graph, t_mc, t_loader, dst_mods, cfg, report)
         removed = resolve_conflicts(graph, cfg)
         if removed:
             report["ok"] = [(n, f) for n, f in report["ok"] if f not in removed]
 
     migrate_big_folders(cfg)
-    return report, same_client
+    elapsed = time.monotonic() - _t0
+    report["elapsed"] = elapsed
+    report["migrated_dirs"] = (([("mods", src_mods, dst_mods)] if cfg.migrate_mods else [])
+                               + list(cfg.migrated_dirs))
+    report["log"] = log_lines
+    cfg.log.info("总耗时: %s" % _fmt_dur(elapsed))
+    src_kind = "服务端" if params.get("src_is_server", False) else (
+        "版本隔离" if src_isolated else "非隔离")
+    dst_kind = ("服务端" if (t_version is None and is_server_root(dst_client))
+                else ("版本隔离" if dst_isolated else "非隔离"))
+    src_desc = "%s（%s）" % (src_client, src_kind)
+    dst_desc = "%s（%s）" % (dst_client, dst_kind)
+    return report, same_client, src_desc, dst_desc
 
 
 def print_failure_links(manual_list, log):
@@ -592,7 +759,7 @@ def print_summary(report, same_client):
         for jname, meta, why in report["manual"]:
             q = meta.get("name") or meta.get("id") or jname
             print("  - %s（%s）" % (jname, why))
-            print("    搜索: https://modrinth.com/search?q=%s" % quote(q))
+            print("    搜索: https://modrinth.com/discover/mods?q=%s" % quote(q))
     if same_client:
         print("（同客户端更新模式，未迁移数据目录）")
 
@@ -614,7 +781,7 @@ def write_report_file(report, src_desc, dst_desc):
         '<div class="manual-item"><span class="manual-name">%s</span>'
         '<span class="manual-file">%s</span>'
         '<span class="manual-reason">%s</span>'
-        '<a class="manual-link" href="https://modrinth.com/search?q=%s" target="_blank">Modrinth 搜索</a></div>'
+        '<a class="manual-link" href="https://modrinth.com/discover/mods?q=%s" target="_blank">Modrinth 搜索</a></div>'
         % (esc((meta or {}).get("name") or (meta or {}).get("id") or jname),
            esc(jname), esc(why),
            quote((meta or {}).get("name") or (meta or {}).get("id") or jname))
@@ -625,6 +792,17 @@ def write_report_file(report, src_desc, dst_desc):
             return ""
         return ('<div class="card"><h2 style="border-left:4px solid %s">%s</h2>%s</div>'
                 % (color, esc(title), body))
+
+    dirs_html = "".join(
+        '<div class="dir-item"><span class="dir-name">%s</span>'
+        '<span class="dir-path">%s</span><span class="dir-arrow">→</span>'
+        '<span class="dir-path">%s</span></div>'
+        % (esc(label), esc(src), esc(dst))
+        for label, src, dst in report.get("migrated_dirs", []))
+    log_lines = report.get("log", [])
+    log_details = ('<details class="card"><summary class="log-summary">完整日志（%d 行，点击展开）</summary>'
+                   '<pre class="log">%s</pre></details>'
+                   % (len(log_lines), esc("\n".join(log_lines))))
 
     stats = ('<div class="card stats">'
              '<div class="stat"><b>%d</b><span>成功下载</span></div>'
@@ -647,6 +825,15 @@ def write_report_file(report, src_desc, dst_desc):
             '.stat b{display:block;font-size:24px;color:#222}\n'
             '.stat span{color:#777;font-size:12px}\n'
             '.stat.warn b{color:#c99700}\n'
+            '.dir-item{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:6px 4px;border-bottom:1px dashed #eee;font-size:13px}\n'
+            '.dir-name{font-weight:700;color:#2f6f4f}\n'
+            '.dir-path{color:#888;font-size:12px;word-break:break-all}\n'
+            'details.card{padding:14px 22px}\n'
+            'summary.log-summary{cursor:pointer;font-weight:700;color:#333;outline:none}\n'
+            'pre.log{background:#f8f9fa;border:1px solid #eee;border-radius:6px;padding:12px;'
+            'font-size:12px;line-height:1.6;max-height:420px;overflow:auto;white-space:pre-wrap;'
+            'word-break:break-all;margin-top:12px}\n'
+            '.dir-arrow{color:#bbb}\n'
             '.ok-item,.skip-item,.dup-item,.dep-item{padding:6px 4px;border-bottom:1px dashed #eee;font-size:13px}\n'
             '.ok-name{font-weight:600;color:#1a7f37}\n'
             '.ok-file{color:#888;margin-left:8px}\n'
@@ -661,13 +848,16 @@ def write_report_file(report, src_desc, dst_desc):
             '.manual-link:hover{text-decoration:underline}\n'
             '</style>\n</head>\n<body><div class="wrap">\n'
             '<h1>MC 模组迁移报告</h1>\n'
-            '<div class="meta">时间：%s<br>源：%s<br>目标：%s</div>\n%s\n%s\n%s\n%s\n%s\n'
+            '<div class="meta">时间：%s　耗时：%s<br>源：%s<br>目标：%s</div>\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n'
             '</div></body></html>'
-            % (now.strftime("%Y-%m-%d %H:%M:%S"), esc(src_desc), esc(dst_desc), stats,
+            % (now.strftime("%Y-%m-%d %H:%M:%S"), _fmt_dur(report.get("elapsed") or 0),
+               esc(src_desc), esc(dst_desc), stats,
+               card("迁移目录", "#2f6f4f", dirs_html),
                card("成功下载", "#2ea043", ok_html),
                card("需手动处理", "#eab308", manual_html),
                card("依赖", "#5b6b8c", dep_html),
-               card("跳过", "#888", skip_html)))
+               card("跳过", "#888", skip_html),
+               log_details))
 
     fname = os.path.join(os.getcwd(), "迁移报告_%s.html" % now.strftime("%Y%m%d_%H%M%S"))
     with open(fname, "w", encoding="utf-8") as f:

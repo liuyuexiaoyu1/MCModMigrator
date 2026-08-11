@@ -321,10 +321,16 @@ def test_fork_detection(tmp):
         print("  · 跳过 fork 测试（无法获取官方 jar）: %s" % e)
         return None
 
-    for name, mid, authors in (("jade_real.jar", "jade", real_authors),
-                               ("sodium_fork.jar", "sodium", ["EvilForker"])):
+    for name, mid, authors, contact in (("jade_real.jar", "jade", real_authors, ""),
+                                        ("sodium_fork.jar", "sodium", ["EvilForker"],
+                                         "https://github.com/mcmm-nonexistent-owner-xyz/mcmm-nonexistent-repo-xyz"),
+                                        ("gca_fork.jar", "gugle-carpet-addition", ["EvilForker"],
+                                         "https://github.com/Fallen-Breath/gugle-carpet-addition")):
+        meta = {"id": mid, "name": mid.title(), "authors": authors, "version": "9.9.9"}
+        if contact:
+            meta["contact"] = {"sources": contact}
         with zipfile.ZipFile(os.path.join(vdir, name), "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("fabric.mod.json", json.dumps({"id": mid, "name": mid.title(), "authors": authors}))
+            z.writestr("fabric.mod.json", json.dumps(meta))
 
     res = run_cli(["--src-root", src_mc, "--src-version", "1.20.1-fabric",
                    "--target-root", dst_mc, "--target-version", "1.20.1-fabric",
@@ -343,11 +349,15 @@ def test_fork_detection(tmp):
     jars = os.listdir(os.path.join(dst_mc, "versions", "1.20.1-fabric", "mods"))
     check(res.returncode == 0, "fork 测试 CLI 正常退出 (rc=%d)" % res.returncode)
     check(any("jade" in j.lower() for j in jars), "作者一致的 jade 正常下载")
-    check(not any("sodium" in j for j in jars), "fork 版 sodium 未被下载")
+    check(not any("sodium" in j for j in jars), "无仓库线索的 fork 版 sodium 未被下载")
     check("疑似 fork 版模组" in out, "fork 版进手动清单并提示原因")
     check("开源仓库" in out and "github.com" in out,
           "完成后打印匹配失败清单并附开源链接")
     check("手动处理" in out, "fork 版进入手动清单")
+    check("Sodium（" in out and "已记入手动清单" in out, "手动清单日志带模组名")
+    check(any("gugle" in j.lower() for j in jars),
+          "有真实 GitHub 仓库的 fork（gugle-carpet-addition）经 release 兜底下载: %s" % jars)
+    check("GitHub release" in out, "GitHub 兜底在日志中提示")
     # 开启 --ignore-fork 后：fork 版也直接下载，仅日志提示
     res2 = run_cli(["--src-root", src_mc, "--src-version", "1.20.1-fabric",
                     "--target-root", dst_mc2, "--target-version", "1.20.1-fabric",
@@ -399,6 +409,67 @@ def test_version_dir(tmp):
     return 0 if ok else 1
 
 
+def test_real_conflict(tmp):
+    """真实 mod 测试：下载真实 sodium + iris（26.2 fabric），验证冲突被识别并自动换成兼容版本"""
+    out_dir = os.path.join(tmp, "real_conflict")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        import requests
+        import tempfile
+
+        def fetch(slug):
+            vs = requests.get("https://api.modrinth.com/v2/project/%s/version" % slug,
+                              params={"game_versions": '["26.2"]', "loaders": '["fabric"]'},
+                              headers={"User-Agent": "mc-mod-migrator-test"}, timeout=30).json()
+            newest = max(vs, key=lambda v: v.get("date_published") or "")
+            p = os.path.join(out_dir, newest["files"][0]["filename"])
+            with open(p, "wb") as f:
+                f.write(requests.get(newest["files"][0]["url"],
+                                     headers={"User-Agent": "mc-mod-migrator-test"},
+                                     timeout=120).content)
+            return newest["version_number"], p
+
+        sodium_ver, sodium_jar = fetch("sodium")
+        iris_ver, iris_jar = fetch("iris")
+        g = mm.ModGraph()
+        sm = mm.parse_mod_jar(sodium_jar)
+        im = mm.parse_mod_jar(iris_jar)
+        g.add_mod("iris", "Iris", im["version"], iris_jar, "iris", im["deps"], im["conflicts"])
+        g.add_mod("sodium", "Sodium", sm["version"], sodium_jar, "sodium", sm["deps"], sm["conflicts"])
+        rep = g.conflict_report()
+        print("真实冲突报告:", rep)
+        has_conflict = any(r["mod"] == "iris" and "sodium" in r["conflicting"] for r in rep)
+        logs = []
+
+        def _sink(msg, level):
+            logs.append(msg)
+            print("  ", msg)
+
+        cfg = mm.RunConfig(log=mm.Logger(_sink))
+        mm.migrator.auto_resolve_conflicts(g, "26.2", "fabric", out_dir, cfg, {"ok": []})
+        after = [r["mod"] for r in g.conflict_report()]
+        print("消解后冲突:", after, "| sodium 现版本:", g.mods["sodium"]["version"])
+        fails = []
+
+        def ok(cond, msg):
+            print(("  ✓ " if cond else "  ✗ ") + msg)
+            if not cond:
+                fails.append(msg)
+
+        ok(has_conflict, "真实 sodium/iris 冲突被识别")
+        ok("iris" not in after and g.mods["sodium"]["version"] != sm["version"],
+           "真实冲突自动换成兼容版本: %s" % g.mods["sodium"]["version"])
+        ok(any("换成不冲突版本" in m for m in logs), "有换版本日志")
+        if fails:
+            print("真实冲突测试失败 %d 项: %s" % (len(fails), fails))
+            return 1
+        print("真实冲突测试通过 ✓")
+        return 0
+    except Exception as e:
+        print("  · 跳过真实冲突测试（网络或上游变化）: %s" % e)
+        return None
+
+
 def test_cross_type(tmp):
     src_mc = os.path.join(tmp, "x_src")
     os.makedirs(os.path.join(src_mc, "versions", "1.20.1-fabric", "mods"), exist_ok=True)
@@ -425,13 +496,14 @@ if __name__ == "__main__":
         rc3 = test_server_overwrite(tmp)
         rc4 = test_fork_detection(tmp)
         rc5 = test_version_dir(tmp)
-        rc6 = test_cross_type(tmp)
+        rc6 = test_real_conflict(tmp)
+        rc7 = test_cross_type(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    if rc2 is None or rc3 is None or rc4 is None or rc5 is None:
+    if rc2 is None or rc3 is None or rc4 is None or rc5 is None or rc6 is None:
         print("\n[S K I P] 网络不可用，在线测试跳过")
         sys.exit(0)
-    sys.exit(1 if (rc1 or rc2 or rc3 or rc4 or rc5 or rc6) else 0)
+    sys.exit(1 if (rc1 or rc2 or rc3 or rc4 or rc5 or rc6 or rc7) else 0)
 
 
 if __name__ == "__main__":

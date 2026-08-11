@@ -259,12 +259,10 @@ def run_cli(args):
               "target_force_isolated": t_force_isolated,
               "target_loader": t_loader, "target_mc": t_mc,
               "stop_event": None}
-    report, same_client = run_migration(params, cfg)
+    report, same_client, src_desc, dst_desc = run_migration(params, cfg)
     print_summary(report, same_client)
     try:
-        f = write_report_file(report,
-                              (mc_root + "/" + src_version) if src_version else (mc_root + " (服务端)"),
-                              (t_root + "/" + t_version) if t_version else (t_root + " (服务端)" if t_is_server else t_root))
+        f = write_report_file(report, src_desc, dst_desc)
         print("报告已保存: %s" % f)
     except OSError as e:
         print("报告保存失败: %s" % e)

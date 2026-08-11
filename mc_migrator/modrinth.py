@@ -5,15 +5,19 @@ import os
 import re
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 import requests
 
 from .core import ASK_CONF, USER_AGENT, LOADER_LABEL, effective_proxies, human_size
+from .graph import version_satisfies
 from .mod_parser import is_wrapper_meta, parse_mod_jar, sha1_of, wrapper_base_id
+from .versions import mc_release_date
 
 API_BASE = "https://api.modrinth.com/v2"
+GH_API = "https://api.github.com"
 _SESSION = requests.Session()
 
 _RATE_LOCK = threading.Lock()
@@ -169,7 +173,6 @@ def pick_version(project_id, mc_version, loader):
 
 
 def pick_version_in_range(project_id, mc_version, loader, ranges):
-    from .graph import version_satisfies
     if not ranges:
         return pick_version(project_id, mc_version, loader)[0]
     vs = mr_versions(project_id, mc_version, loader)
@@ -370,6 +373,167 @@ def resolve_via_mcmod(meta):
         return None
 
 
+def _github_repo(meta, pid):
+    contact = meta.get("contact") or {}
+    for k in ("sources", "issues", "homepage"):
+        m = re.search(r"github\.com/([^/?#]+)/([^/?#]+)", str(contact.get(k) or ""))
+        if m:
+            return _clean_gh_repo(m.group(1), m.group(2))
+    if pid:
+        try:
+            data = mr_get("project/%s" % pid)
+        except requests.RequestException:
+            data = None
+        if data and data.get("source_url"):
+            m = re.search(r"github\.com/([^/?#]+)/([^/?#]+)", str(data["source_url"]))
+            if m:
+                return _clean_gh_repo(m.group(1), m.group(2))
+    return None
+
+
+def _clean_gh_repo(owner, name):
+    if not owner or not name or owner in ("topics", "settings"):
+        return None
+    if name.endswith(".git"):
+        name = name[:-4]
+    return "%s/%s" % (owner, name)
+
+
+def _gh_releases(repo):
+    for path in ("repos/%s/releases?per_page=10" % repo,
+                 "repos/%s/releases/latest" % repo):
+        try:
+            r = _SESSION.get(GH_API + "/" + path, headers={"User-Agent": USER_AGENT},
+                             timeout=20, proxies=effective_proxies())
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, list) else [data]
+        except requests.RequestException:
+            continue
+    return _gh_releases_html(repo)
+
+
+def _gh_html_get(url):
+    for attempt in range(3):
+        try:
+            r = _SESSION.get(url, headers={"User-Agent": USER_AGENT}, timeout=20,
+                             proxies=effective_proxies())
+            r.raise_for_status()
+            return r
+        except requests.RequestException:
+            if attempt == 2:
+                return None
+            time.sleep(1.5)
+
+
+def _gh_releases_html(repo):
+    out = []
+    r = _gh_html_get("https://github.com/%s/releases.atom" % repo)
+    if r is None:
+        return out
+    for e in re.findall(r"<entry>(.*?)</entry>", r.text, re.S)[:20]:
+        tag = ""
+        im = re.search(r"<id>.*?/([^/]+)</id>", e, re.S)
+        tm = re.search(r"<title>(.*?)</title>", e, re.S)
+        if im:
+            tag = im.group(1).strip()
+        elif tm:
+            tag = tm.group(1).strip()
+        dm = re.search(r"<updated>(.*?)</updated>", e)
+        if not tag:
+            continue
+        assets = []
+        ar = _gh_html_get("https://github.com/%s/releases/expanded_assets/%s"
+                          % (repo, quote(tag, safe="")))
+        if ar is not None:
+            for href in re.findall(r'href="(/[^"]+/releases/download/[^"]+)"', ar.text):
+                if href.lower().endswith(".jar"):
+                    assets.append({"name": os.path.basename(href),
+                                   "browser_download_url": "https://github.com" + href})
+        if assets:
+            out.append({"tag_name": tag, "name": tag, "body": "",
+                        "published_at": (dm.group(1) if dm else ""), "assets": assets})
+            if len(out) >= 10:
+                break
+    return out
+
+
+def _pick_gh_asset(release, mc_version):
+    jars = [a for a in release.get("assets") or []
+            if (a.get("name") or "").lower().endswith(".jar")]
+    runnable = [a for a in jars
+                if not re.search(r"[-_.](sources|src|javadoc)(?=[.-]|$)",
+                                 (a.get("name") or "").lower())]
+    if runnable:
+        jars = runnable
+    if len(jars) == 1:
+        return jars[0], "release 仅含一个 jar 文件，直接下载"
+    for a in jars:
+        if mc_version and mc_version in (a.get("name") or ""):
+            return a, "release 文件包含目标版本 %s" % mc_version
+    blob = "%s %s %s" % (release.get("tag_name") or "", release.get("name") or "",
+                         release.get("body") or "")
+    if mc_version and mc_version in blob and jars:
+        return jars[0], "release 标题/说明包含目标版本 %s" % mc_version
+    return None, None
+
+
+def resolve_via_github(meta, mc_version, pid, compare_dir):
+    if not compare_dir:
+        return None
+    repo = _github_repo(meta, pid)
+    if not repo:
+        return None
+    releases = _gh_releases(repo)
+    if not releases:
+        return None
+    mc_date = mc_release_date(mc_version)
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        pub = rel.get("published_at") or ""
+        if mc_date and pub and pub < mc_date:
+            continue
+        asset, why = _pick_gh_asset(rel, mc_version)
+        if not asset:
+            continue
+        url = asset.get("browser_download_url")
+        if not url:
+            continue
+        dest, err = mr_download_file({"files": [{"filename": asset.get("name") or "mod.jar",
+                                                  "url": url}]}, compare_dir)
+        if not dest:
+            continue
+        cm = parse_mod_jar(dest)
+        adapted = bool(cm)
+        if adapted:
+            try:
+                with zipfile.ZipFile(dest) as z:
+                    names = z.namelist()
+                if any(n.lower().endswith(".java") for n in names) \
+                        and not any(n.lower().endswith(".class") for n in names):
+                    adapted = False
+            except Exception:
+                pass
+            if adapted:
+                for mid, rng in cm.get("deps", []):
+                    if mid == "minecraft" and not version_satisfies(mc_version, rng):
+                        adapted = False
+                        break
+        if not adapted:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            continue
+        return (repo, asset.get("name") or "",
+                "从 GitHub release 兜底下载（%s，发布于 %s，%s）" % (repo, (pub or "?")[:10], why),
+                dest)
+    return None
+
+
 def _same_version_compare(same, compare_dir, local_sha1):
     if compare_dir:
         dest, err = mr_download_file(same, compare_dir)
@@ -468,7 +632,14 @@ def match_to_project(meta, mc_version, loader, jar_path, ignore_fork=False,
                                             (matched if isinstance(matched, str) else None)
                             if ignore_fork:
                                 return pid, 1.0, "作者校验未通过，已按选项忽略（疑似 fork 版，请留意）", None
+                            gh = resolve_via_github(m_used, mc_version, pid, compare_dir)
+                            if gh:
+                                return "github:" + gh[0], 1.0, gh[2], gh[3]
                             return None, 0.0, "作者不一致（疑似 fork 版模组）", None
+                else:
+                    gh = resolve_via_github(m_used, mc_version, pid, compare_dir)
+                    if gh:
+                        return "github:" + gh[0], 1.0, gh[2], gh[3]
 
             why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
             return pid, best[0], why, None
@@ -480,14 +651,34 @@ def match_to_project(meta, mc_version, loader, jar_path, ignore_fork=False,
 
 class Downloader:
 
-    def __init__(self, max_workers=4, worker=None):
+    def __init__(self, max_workers=4, worker=None, log=None):
         self._worker = worker or mr_download_file
         self._pool = ThreadPoolExecutor(max_workers=max(1, int(max_workers)))
         self._tasks = []
+        self._log = log
+
+    def _log_done(self, fut, label, kind):
+        try:
+            dest, err = fut.result()
+        except Exception as e:
+            dest, err = None, str(e)
+        if dest:
+            size = human_size(os.path.getsize(dest)) if os.path.exists(dest) else "?"
+            if kind == "mod":
+                self._log.info("已下载: %s (%s)" % (os.path.basename(dest), size))
+            else:
+                self._log.info("依赖 %s -> %s (%s)" % (label, os.path.basename(dest), size))
+        else:
+            if kind == "mod":
+                self._log.error("下载失败: %s" % err)
+            else:
+                self._log.error("依赖 %s 下载失败: %s" % (label, err))
 
     def submit(self, label, file_info, dest_dir, kind="mod", extra=None):
         fut = self._pool.submit(self._worker, file_info, dest_dir)
         self._tasks.append((label, kind, extra, fut))
+        if self._log is not None:
+            fut.add_done_callback(lambda f, lb=label, kd=kind: self._log_done(f, lb, kd))
         return fut
 
     @property
@@ -497,7 +688,13 @@ class Downloader:
     def gather(self, stop_event=None, log=None):
         results = []
         total = len(self._tasks)
-        done = 0
+        completed = [0]
+
+        def _count(_f):
+            completed[0] += 1
+
+        for _label, _kind, _extra, fut in self._tasks:
+            fut.add_done_callback(_count)
         for label, kind, extra, fut in self._tasks:
             if stop_event is not None and stop_event.is_set():
                 break
@@ -507,8 +704,7 @@ class Downloader:
                     break
                 except TimeoutError:
                     if log is not None:
-                        log.info("下载进行中... 已完成 %d/%d" % (done, total))
-            done += 1
+                        log.info("下载进行中... 已完成 %d/%d" % (completed[0], total))
             results.append((label, kind, extra, dest, err))
         return results
 

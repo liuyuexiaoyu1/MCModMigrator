@@ -6,8 +6,6 @@ import sys
 import threading
 import time
 
-LOG_FILE = "迁移日志.txt"
-
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
     HAVE_QT = True
@@ -47,11 +45,6 @@ class MigrateWorker:
 
     def log_sink(self, msg, level="info"):
         self.msg_queue.put(("log", level, msg))
-        try:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(msg + "\n")
-        except OSError:
-            pass
 
     def confirm_sync(self, prompt):
         self.msg_queue.put(("confirm", prompt))
@@ -76,8 +69,9 @@ class MigrateWorker:
     def run(self):
         from .migrator import run_migration
         try:
-            report, same_client = run_migration(self.params, self.cfg)
-            self.msg_queue.put(("done", {"report": report, "same": same_client}))
+            report, same_client, src_desc, dst_desc = run_migration(self.params, self.cfg)
+            self.msg_queue.put(("done", {"report": report, "same": same_client,
+                                         "src_desc": src_desc, "dst_desc": dst_desc}))
         except Exception as e:
             self.msg_queue.put(("fail", str(e)))
 
@@ -264,12 +258,15 @@ class MainWindow(QtWidgets.QWidget):
         self.stop_btn = QtWidgets.QPushButton("停止")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop)
+        self.clear_log_btn = QtWidgets.QPushButton("清空日志")
+        self.clear_log_btn.clicked.connect(lambda: self.log_view.clear())
         self.progress = QtWidgets.QProgressBar()
         self.progress.setFixedHeight(18)
         self.progress.setRange(0, 0)
         self.progress.hide()
         bar.addWidget(self.start_btn)
         bar.addWidget(self.stop_btn)
+        bar.addWidget(self.clear_log_btn)
         bar.addWidget(self.progress, 1)
         root.addLayout(bar)
 
@@ -592,11 +589,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def _render_log(self, msg, level="info"):
         self._last_log_time = time.time()
-        color = {"error": "#d32f2f", "warn": "#b45309"}.get(level)
-        if color:
-            self.log_view.appendHtml('<span style="color:%s">%s</span>' % (color, html.escape(msg)))
-        else:
-            self.log_view.appendPlainText(msg)
+        color = {"error": "#d32f2f", "warn": "#b45309", "info": "#000000"}.get(level, "#000000")
+        self.log_view.appendHtml('<span style="color:%s">%s</span>' % (color, html.escape(msg)))
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -701,7 +695,9 @@ class MainWindow(QtWidgets.QWidget):
             for jname, meta, why in report["manual"]:
                 self._log("  - %s（%s）" % (jname, why), "warn")
         try:
-            f = write_report_file(report, self._src_desc(), self._dst_desc())
+            f = write_report_file(report,
+                                  result.get("src_desc") or self._src_desc(),
+                                  result.get("dst_desc") or self._dst_desc())
             self._log("\n报告已保存: %s" % f)
         except OSError as e:
             self._log("报告保存失败: %s" % e, "error")
