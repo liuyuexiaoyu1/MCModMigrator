@@ -9,9 +9,11 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: windows-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,6 +24,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
@@ -32,34 +35,52 @@ jobs:
         run: echo "version=$(python -c 'import mc_migrator; print(mc_migrator.__version__)')" >> $GITHUB_OUTPUT
 
       - name: Run unit tests
+        shell: bash
         run: python tests/test_core.py
 
-      - name: Build exe
+      - name: Build binary
+        shell: bash
         run: python -m PyInstaller --onefile --windowed --clean --noconfirm --name "MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}" mod_migrator.py
+
+      - name: Rename Linux binary
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: mv "dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}" "dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}-linux"
+
+      - name: Package macOS app
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: cd dist && zip -r "MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}-macos.zip" "MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}.app"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}
-          path: dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}.exe
+          name: MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}-${{ matrix.os }}
+          path: |
+            dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}.exe
+            dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}-macos.zip
+            dist/MCModMigrator-${{ steps.version.outputs.version || '0.0.0' }}-linux
           if-no-files-found: error
 
   release:
-    name: Upload exe to Release
+    name: Upload binaries to Release
     needs: build
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: MCModMigrator-${{ needs.build.outputs.version || '0.0.0' }}*
+          pattern: MCModMigrator-*
           path: release-dist
           merge-multiple: true
 
-      - name: Upload exe
+      - name: Upload binaries
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" release-dist/MCModMigrator-${{ needs.build.outputs.version || '0.0.0' }}.exe --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" release-dist/* --clobber

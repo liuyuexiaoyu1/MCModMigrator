@@ -63,6 +63,7 @@ def human_size(n):
 def default_mc_root():
     cands = [
         os.path.expandvars(r"%APPDATA%\.minecraft"),
+        os.path.expanduser("~/Library/Application Support/minecraft"),
         os.path.expanduser("~/.minecraft"),
     ]
     return next((c for c in cands if os.path.isdir(c)), cands[0])
