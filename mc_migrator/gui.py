@@ -9,9 +9,10 @@ import time
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
     HAVE_QT = True
-except ImportError:
+except Exception:
     QtCore = QtGui = QtWidgets = None
     HAVE_QT = False
+    raise ImportError("PySide6 is not available")
 
 CONFIRM_TIMEOUT_MS = 60000
 

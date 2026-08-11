@@ -23,6 +23,12 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Install Linux Qt libraries
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxkbcommon0 libgl1 libegl1 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-render-util0
+
       - name: Install dependencies
         shell: bash
         run: |

@@ -39,11 +39,15 @@ def parse_args():
 
 
 def main():
-    from mc_migrator.gui import HAVE_QT, run_gui
     args = parse_args()
     if args.cli:
         run_cli(args)
-    elif HAVE_QT:
+        return
+    try:
+        from mc_migrator.gui import HAVE_QT, run_gui
+    except ImportError:
+        HAVE_QT = False
+    if HAVE_QT:
         run_gui(args)
     else:
         print("未安装 PySide6，请先执行:  pip install PySide6")

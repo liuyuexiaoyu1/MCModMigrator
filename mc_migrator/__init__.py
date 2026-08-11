@@ -39,7 +39,11 @@ from .migrator import (RunConfig, copy_saves_merge, copy_tree_missing,
                        write_report_file)
 from .cli import (ask, ask_path, ask_yes_no, choose_loader, cli_pick_mc_version,
                   pick_from_list, run_cli)
-from .gui import HAVE_QT, MainWindow, MigrateWorker, VersionFetcher, run_gui
+try:
+    from .gui import HAVE_QT, MainWindow, MigrateWorker, VersionFetcher, run_gui
+except ImportError:
+    HAVE_QT = False
+    MainWindow = MigrateWorker = VersionFetcher = run_gui = None
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
