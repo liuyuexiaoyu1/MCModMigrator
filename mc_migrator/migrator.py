@@ -4,17 +4,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import requests
+
 BIG_FOLDER_THRESHOLD = 5 * 1024 ** 3
 
 from .core import (ASK_CONF, CHOICE_KEYS, HIGH_CONF, KNOWN_DIRS, KNOWN_FILES,
                    LOADER_LABEL, OPTIONAL_DIRS, OPTIONAL_FILES, SERVER_FILES,
                    Logger, PROXY_SETTINGS, human_size, plain_log_sink)
 from .clients import client_paths, detect_loader, is_server_root, sniff_server_loader
-from .mod_parser import parse_mod_jar
+from .mod_parser import parse_mod_jar, sha1_of
 from .modrinth import (Downloader, collect_deps, configure_http,
-                       match_to_project, mr_download_file, mr_versions,
-                       pick_version, pick_version_in_range, primary_filename,
-                       ver_compatible)
+                       match_to_project, mr_download_file, mr_lookup_sha1,
+                       mr_versions, pick_version, pick_version_in_range,
+                       primary_filename, ver_compatible)
 from .graph import version_satisfies
 
 
@@ -215,6 +217,66 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
                               gmeta.get("version") or "", dest, pid,
                               gmeta.get("deps") or [], gmeta.get("conflicts") or [])
         _pin_dependency_versions(graph, mc_version, loader, target_mods_dir, cfg, report)
+
+
+def _lookup_project_id(jpath):
+    try:
+        ver = mr_lookup_sha1(sha1_of(jpath))
+        if ver and ver.get("project_id"):
+            return ver["project_id"]
+    except requests.RequestException:
+        pass
+    return None
+
+
+def repair_mods_same_dir(mods_dir, mc_version, loader, cfg, report, graph):
+    jars = sorted(f for f in os.listdir(mods_dir) if f.lower().endswith(".jar"))
+    if not jars:
+        cfg.log.warn("mods 目录中没有 jar 文件: %s" % mods_dir)
+        return
+    n = len(jars)
+    cfg.log.info("同目录同版本更新模式：只解包检查依赖与冲突，不重新下载（%d 个 jar）" % n)
+    cfg.log.info("阶段一：全部解包解析元数据 ...")
+    metas = [None] * n
+    with ThreadPoolExecutor(max_workers=cfg.analysis_threads) as pool:
+        for i, jname in enumerate(jars):
+            metas[i] = pool.submit(parse_mod_jar, os.path.join(mods_dir, jname))
+        for i in range(n):
+            try:
+                metas[i] = metas[i].result()
+            except Exception:
+                metas[i] = None
+    cfg.log.info("阶段二：sha1 识别项目并构建依赖图 ...")
+    ids = [None] * n
+    with ThreadPoolExecutor(max_workers=cfg.analysis_threads) as pool:
+        for i, jname in enumerate(jars):
+            if metas[i] is None or metas[i].get("library"):
+                continue
+            ids[i] = pool.submit(_lookup_project_id, os.path.join(mods_dir, jname))
+        for i in range(n):
+            if ids[i] is None:
+                continue
+            try:
+                ids[i] = ids[i].result()
+            except Exception:
+                ids[i] = None
+    for jname, meta, pid in zip(jars, metas, ids):
+        if meta is None:
+            report["skipped"].append(jname)
+            cfg.log.warn("%s 无法解析（可能不是模组或文件损坏），跳过" % jname)
+            continue
+        if meta.get("library"):
+            report["skipped"].append(jname)
+            cfg.log.info("%s 是库文件（library=true），跳过" % jname)
+            continue
+        graph.add_mod(meta.get("id") or jname, meta.get("name") or jname,
+                      meta.get("version") or "", os.path.join(mods_dir, jname),
+                      pid, meta.get("deps") or [], meta.get("conflicts") or [])
+        report["checked"].append((meta.get("name") or meta.get("id"), jname))
+    if not graph.mods:
+        cfg.log.warn("没有可检查的模组")
+        return
+    _pin_dependency_versions(graph, mc_version, loader, mods_dir, cfg, report)
 
 
 def _pin_dependency_versions(graph, mc_version, loader, target_mods_dir, cfg, report):
@@ -671,6 +733,10 @@ def run_migration(params, cfg):
 
     same_client = os.path.normcase(os.path.realpath(src_client)) == \
                   os.path.normcase(os.path.realpath(dst_client))
+    repair_mode = bool(not params.get("src_is_server", False)
+                       and same_client
+                       and (not src_version or not t_version
+                            or src_version == t_version))
     if same_client:
         cfg.log.info("注意: 源与目标是同一目录，进入「更新模组」模式（只更新 mods，不迁移数据）")
 
@@ -682,14 +748,18 @@ def run_migration(params, cfg):
 
     cfg.log.info("\n=== 模组迁移（源 mods 目录: %s）===" % src_mods)
 
-    report = {"ok": [], "manual": [], "deps": [], "skipped": [], "duplicates": []}
+    report = {"ok": [], "manual": [], "deps": [], "skipped": [], "duplicates": [],
+              "checked": []}
     from .graph import ModGraph
     from .versions import base_mc_version
     graph = ModGraph()
     if cfg.migrate_mods:
         src_mc_ver = base_mc_version(src_version) if src_version else ""
-        migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event, graph,
-                     src_mc_version=src_mc_ver)
+        if repair_mode:
+            repair_mods_same_dir(dst_mods, t_mc, t_loader, cfg, report, graph)
+        else:
+            migrate_mods(src_mods, dst_mods, t_mc, t_loader, cfg, report, stop_event, graph,
+                         src_mc_version=src_mc_ver)
     else:
         cfg.log.info("未勾选「迁移 mod」，跳过模组迁移")
 
@@ -710,7 +780,8 @@ def run_migration(params, cfg):
     migrate_big_folders(cfg)
     elapsed = time.monotonic() - _t0
     report["elapsed"] = elapsed
-    report["migrated_dirs"] = (([("mods", src_mods, dst_mods)] if cfg.migrate_mods else [])
+    report["migrated_dirs"] = (([("mods", src_mods, dst_mods)]
+                                if cfg.migrate_mods and not repair_mode else [])
                                + list(cfg.migrated_dirs))
     report["log"] = log_lines
     cfg.log.info("总耗时: %s" % _fmt_dur(elapsed))
@@ -744,6 +815,10 @@ def print_summary(report, same_client):
     from urllib.parse import quote
     print("\n" + "=" * 50)
     print("迁移完成，摘要：")
+    if report.get("checked"):
+        print("已检查现有模组 %d 个：" % len(report["checked"]))
+        for name, jname in report["checked"]:
+            print("  %s（%s）" % (name, jname))
     print("成功下载 %d 个模组：" % len(report["ok"]))
     for name, fname in report["ok"]:
         print("  %s -> %s" % (name, fname))
@@ -778,6 +853,9 @@ def write_report_file(report, src_desc, dst_desc):
     ok_html = "".join(
         '<div class="ok-item"><span class="ok-name">%s</span><span class="ok-file">%s</span></div>'
         % (esc(n), esc(f)) for n, f in report["ok"])
+    checked_html = "".join(
+        '<div class="ok-item"><span class="ok-name">%s</span><span class="ok-file">%s</span></div>'
+        % (esc(n), esc(j)) for n, j in report.get("checked", []))
     skip_html = "".join('<div class="skip-item">%s</div>' % esc(j) for j in report["skipped"])
     dep_html = "".join('<div class="dep-item">%s</div>' % esc(d) for d in report["deps"])
     manual_html = "".join(
@@ -807,12 +885,15 @@ def write_report_file(report, src_desc, dst_desc):
                    '<pre class="log">%s</pre></details>'
                    % (len(log_lines), esc("\n".join(log_lines))))
 
-    stats = ('<div class="card stats">'
-             '<div class="stat"><b>%d</b><span>成功下载</span></div>'
+    if report.get("checked"):
+        stat_first = '<div class="stat"><b>%d</b><span>已检查模组</span></div>' % len(report["checked"])
+    else:
+        stat_first = '<div class="stat"><b>%d</b><span>成功下载</span></div>' % len(report["ok"])
+    stats = ('<div class="card stats">%s'
              '<div class="stat warn"><b>%d</b><span>需手动处理</span></div>'
              '<div class="stat"><b>%d</b><span>依赖</span></div>'
              '<div class="stat"><b>%d</b><span>跳过</span></div></div>'
-             % (len(report["ok"]), len(report["manual"]), len(report["deps"]),
+             % (stat_first, len(report["manual"]), len(report["deps"]),
                 len(report["skipped"])))
 
     page = ('<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
@@ -851,11 +932,12 @@ def write_report_file(report, src_desc, dst_desc):
             '.manual-link:hover{text-decoration:underline}\n'
             '</style>\n</head>\n<body><div class="wrap">\n'
             '<h1>MC 模组迁移报告</h1>\n'
-            '<div class="meta">时间：%s　耗时：%s<br>源：%s<br>目标：%s</div>\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n'
+            '<div class="meta">时间：%s　耗时：%s<br>源：%s<br>目标：%s</div>\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n'
             '</div></body></html>'
             % (now.strftime("%Y-%m-%d %H:%M:%S"), _fmt_dur(report.get("elapsed") or 0),
                esc(src_desc), esc(dst_desc), stats,
                card("迁移目录", "#2f6f4f", dirs_html),
+               card("已检查模组", "#2f6f4f", checked_html),
                card("成功下载", "#2ea043", ok_html),
                card("需手动处理", "#eab308", manual_html),
                card("依赖", "#5b6b8c", dep_html),

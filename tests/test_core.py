@@ -962,6 +962,65 @@ try:
     finally:
         _mr.mr_versions = _orig_versions
 
+    print("== 13. 同目录同版本依赖体检（只检查不下载，自动修复）==")
+    import mc_migrator.migrator as _mg
+    import mc_migrator.modrinth as _mr3
+    _saved13 = (_mr3.mr_lookup_sha1, _mr3.mr_versions, _mr3.mr_download_file)
+
+    def fake_lookup13(sha1):
+        return {"project_id": "PB", "version_number": "1.0.0"}
+
+    def fake_versions13(pid, mc=None, loader=None):
+        return [{"id": "v2", "version_number": "2.0.0", "date_published": "2026-02-01",
+                 "game_versions": ["1.20.1"], "loaders": ["fabric"],
+                 "files": [{"primary": True, "filename": "b-2.0.0.jar"}]},
+                {"id": "v1", "version_number": "1.0.0", "date_published": "2026-01-01",
+                 "game_versions": ["1.20.1"], "loaders": ["fabric"],
+                 "files": [{"primary": True, "filename": "b-1.0.0.jar"}]}]
+
+    def fake_dl13(file_info, dest_dir):
+        fn = file_info["files"][0]["filename"]
+        p = os.path.join(dest_dir, fn)
+        make_jar(p, {"fabric.mod.json": json.dumps(
+            {"id": "bmod", "name": "BMod", "version": fn[2:-4]})})
+        return p, None
+
+    for _m in (_mr3, _mg):
+        _m.mr_lookup_sha1 = fake_lookup13
+        _m.mr_versions = fake_versions13
+        _m.mr_download_file = fake_dl13
+    try:
+        mods_dir = os.path.join(tmp, "repair_mods")
+        os.makedirs(mods_dir, exist_ok=True)
+        make_jar(os.path.join(mods_dir, "a.jar"), {"fabric.mod.json": json.dumps(
+            {"id": "amod", "name": "AMod", "version": "1.0",
+             "depends": {"bmod": ">=2.0", "minecraft": "1.20.1"}})})
+        make_jar(os.path.join(mods_dir, "b.jar"), {"fabric.mod.json": json.dumps(
+            {"id": "bmod", "name": "BMod", "version": "1.0",
+             "depends": {"minecraft": "1.20.1"}})})
+        rep_logs = []
+
+        def _sink13(msg, level):
+            rep_logs.append(msg)
+
+        cfg13 = mm.RunConfig(log=mm.Logger(_sink13))
+        rep13 = {"ok": [], "manual": [], "deps": [], "skipped": [], "duplicates": [],
+                 "checked": []}
+        g13 = mm.ModGraph()
+        _mg.repair_mods_same_dir(mods_dir, "1.20.1", "fabric", cfg13, rep13, g13)
+        ok(set(g13.mods) == {"amod", "bmod"} and len(rep13["checked"]) == 2,
+           "体检解包全部模组并构建依赖图: %s" % sorted(g13.mods))
+        ok(g13.mods["bmod"]["version"] == "2.0.0" and os.path.exists(g13.mods["bmod"]["file"])
+           and not os.path.exists(os.path.join(mods_dir, "b.jar")),
+           "依赖不满足自动更换 bmod 为 2.0.0")
+        ok(any("amod 依赖 bmod@>=2.0，已将 bmod（当前版本 1.0）更换为版本 2.0.0" in m
+               for m in rep_logs),
+           "体检更换版本日志统一格式并标出当前版本")
+        ok(not any("提交下载" in m for m in rep_logs), "体检不重新下载模组")
+    finally:
+        for _m in (_mr3, _mg):
+            _m.mr_lookup_sha1, _m.mr_versions, _m.mr_download_file = _saved13
+
     print("\n全部通过: %d 项断言" % PASS)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)

@@ -489,6 +489,30 @@ def test_cross_type(tmp):
     return 0 if ok else 1
 
 
+def test_same_dir_repair(tmp):
+    src_mc = os.path.join(tmp, "repair_src")
+    make_client(src_mc, "1.20.1-fabric", "net.fabricmc:fabric-loader:0.15.10",
+                mods=[("sodium_extra_installed.jar",
+                       {"id": "sodium-extra", "name": "Sodium Extra", "version": "0.5.0",
+                        "depends": {"sodium": "*"}})])
+
+    res = run_cli(["--src-root", src_mc, "--src-version", "1.20.1-fabric",
+                   "--target-root", src_mc, "--target-version", "1.20.1-fabric",
+                   "--target-loader", "fabric", "--target-mc", "1.20.1",
+                   "--yes", "--skip-data"])
+    out = (res.stdout + "\n" + res.stderr).strip()
+    print(out[-900:])
+    ok = (res.returncode == 0
+          and "同目录同版本更新模式" in out
+          and "不重新下载" in out
+          and "提交下载" not in out
+          and "依赖图统计" in out
+          and "已检查现有模组" in out
+          and "Sodium Extra" in out)
+    print(("  ✓ " if ok else "  ✗ ") + "同目录同版本只检查依赖冲突不下载 (rc=%d)" % res.returncode)
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
     tmp = tempfile.mkdtemp(prefix="mcmod_e2e_")
     try:
@@ -499,12 +523,13 @@ if __name__ == "__main__":
         rc5 = test_version_dir(tmp)
         rc6 = test_real_conflict(tmp)
         rc7 = test_cross_type(tmp)
+        rc8 = test_same_dir_repair(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if rc2 is None or rc3 is None or rc4 is None or rc5 is None or rc6 is None:
         print("\n[S K I P] 网络不可用，在线测试跳过")
         sys.exit(0)
-    sys.exit(1 if (rc1 or rc2 or rc3 or rc4 or rc5 or rc6 or rc7) else 0)
+    sys.exit(1 if (rc1 or rc2 or rc3 or rc4 or rc5 or rc6 or rc7 or rc8) else 0)
 
 
 if __name__ == "__main__":
