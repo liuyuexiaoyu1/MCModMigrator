@@ -325,7 +325,7 @@ def test_fork_detection(tmp):
                                         ("sodium_fork.jar", "sodium", ["EvilForker"],
                                          "https://github.com/mcmm-nonexistent-owner-xyz/mcmm-nonexistent-repo-xyz"),
                                         ("gca_fork.jar", "gugle-carpet-addition", ["EvilForker"],
-                                         "https://github.com/Fallen-Breath/gugle-carpet-addition")):
+                                         "https://github.com/Gu-ZT/gugle-carpet-addition")):
         meta = {"id": mid, "name": mid.title(), "authors": authors, "version": "9.9.9"}
         if contact:
             meta["contact"] = {"sources": contact}
@@ -459,7 +459,8 @@ def test_real_conflict(tmp):
         ok(has_conflict, "真实 sodium/iris 冲突被识别")
         ok("iris" not in after and g.mods["sodium"]["version"] != sm["version"],
            "真实冲突自动换成兼容版本: %s" % g.mods["sodium"]["version"])
-        ok(any("换成不冲突版本" in m for m in logs), "有换版本日志")
+        ok(any("更换为不冲突版本" in m and "当前版本" in m for m in logs),
+           "有换版本日志（统一格式并标出当前版本）: %s" % [m for m in logs if "不冲突版本" in m])
         if fails:
             print("真实冲突测试失败 %d 项: %s" % (len(fails), fails))
             return 1

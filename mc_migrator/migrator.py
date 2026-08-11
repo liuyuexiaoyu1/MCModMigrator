@@ -236,10 +236,11 @@ def _pin_dependency_versions(graph, mc_version, loader, target_mods_dir, cfg, re
                 os.remove(old)
             except OSError:
                 pass
+        cfg.log.info("%s 依赖 %s@%s，已将 %s（当前版本 %s）更换为版本 %s"
+                     % (a, b, ",".join(ranges), b, binfo.get("version") or "?",
+                        ver.get("version_number") or "?"))
         binfo["file"] = dest
         binfo["version"] = ver.get("version_number") or ""
-        cfg.log.info("%s 依赖 %s@%s，已将 %s 更换为版本 %s"
-                     % (a, b, ",".join(ranges), b, ver.get("version_number")))
         report["ok"] = [(n, f) for n, f in report["ok"] if f != os.path.basename(old)] + \
                        [(binfo.get("name") or b, os.path.basename(dest))]
 
@@ -277,11 +278,13 @@ def _replace_version(binfo, candidates, ranges, target_mods_dir, cfg, note, repo
                 os.remove(old)
             except OSError:
                 pass
+        cfg.log.info("%s 与 %s 冲突，已将 %s（当前版本 %s）更换为不冲突版本 %s"
+                     % (binfo.get("name") or "mod", note, binfo.get("name") or "mod",
+                        binfo.get("version") or "?", v.get("version_number") or jver))
         binfo["file"] = dest
         binfo["version"] = jver
         report["ok"] = [(n, f) for n, f in report["ok"] if f != os.path.basename(old)] + \
                        [(binfo.get("name") or "mod", os.path.basename(dest))]
-        cfg.log.info("%s 与 %s 冲突，已更换为不冲突版本 %s" % (binfo.get("name") or "mod", note, jver))
         return True
     return False
 
@@ -360,6 +363,8 @@ def _replace_breaker(item, graph, mc_version, loader, target_mods_dir, cfg, repo
                     os.remove(old)
                 except OSError:
                     pass
+            cfg.log.info("%s 与 %s 冲突，已将 %s（当前版本 %s）更换为不冲突版本 %s"
+                         % (a, b, a, ainfo.get("version") or "?", v.get("version_number") or "?"))
             ainfo["file"] = final
             ainfo["version"] = v.get("version_number") or ""
             report["ok"] = [(n, f) for n, f in report["ok"] if f != os.path.basename(old)] + \
@@ -371,8 +376,6 @@ def _replace_breaker(item, graph, mc_version, loader, target_mods_dir, cfg, repo
             for src, reqs in graph.conf_reqs.items():
                 for t in reqs:
                     graph.conflicting.setdefault(t, set()).add(src)
-            cfg.log.info("%s 与 %s 冲突，已将 %s 换成不冲突版本 %s"
-                         % (a, b, a, v.get("version_number")))
             return True
     return False
 
