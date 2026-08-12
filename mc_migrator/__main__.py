@@ -35,6 +35,7 @@ def parse_args():
     p.add_argument("--migrate", help="仅迁移指定数据类别，逗号分隔: " + ",".join(CHOICE_KEYS))
     p.add_argument("--overwrite", action="store_true",
                    help="服务端覆盖模式：直接在源服务端目录更新 mods")
+    p.add_argument("--curseforge-key", help="CurseForge API Key（默认读环境变量 CURSEFORGE_API_KEY）")
     return p.parse_args()
 
 

@@ -12,6 +12,7 @@ from urllib.parse import quote
 import requests
 
 from .core import ASK_CONF, USER_AGENT, LOADER_LABEL, effective_proxies, human_size
+from .curseforge import resolve_via_curseforge
 from .graph import version_satisfies
 from .mod_parser import is_wrapper_meta, parse_mod_jar, sha1_of, wrapper_base_id
 from .versions import mc_release_date
@@ -643,9 +644,15 @@ def match_to_project(meta, mc_version, loader, jar_path, ignore_fork=False,
 
             why = best[1] + ("（来自内嵌模组 jar）" if best[3] else "")
             return pid, best[0], why, None
+    cf = resolve_via_curseforge(meta, mc_version, loader, compare_dir, jar_path)
+    if cf:
+        return cf[0], 1.0, cf[2], cf[3]
     resolved = resolve_via_mcmod(meta)
     if resolved:
         return resolved[0], 1.0, "通过 mcmod.cn 定位到 Modrinth 项目（%s）" % resolved[1], None
+    gh = resolve_via_github(meta, mc_version, None, compare_dir)
+    if gh:
+        return "github:" + gh[0], 1.0, gh[2], gh[3]
     return None, 0.0, "无搜索结果", None
 
 

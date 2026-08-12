@@ -1021,6 +1021,154 @@ try:
         for _m in (_mr3, _mg):
             _m.mr_lookup_sha1, _m.mr_versions, _m.mr_download_file = _saved13
 
+    print("== 14. 报告模组名称排序 ==")
+    import io as _io
+    import contextlib as _cl
+    import mc_migrator.migrator as _mg2
+    rep14 = {"ok": [("Zebra", "z.jar"), ("Alpha", "a.jar"), ("中文字", "c.jar")],
+             "manual": [("b.jar", {"name": "Beta"}, "原因"), ("a.jar", {"name": "Apple"}, "原因")],
+             "deps": ["依赖 Z -> z", "依赖 A -> a"],
+             "skipped": ["z2.jar", "a2.jar"],
+             "checked": [("Zeta", "z3.jar"), ("Alpha2", "a3.jar")],
+             "migrated_dirs": [], "log": [], "elapsed": 1.0}
+    _buf = _io.StringIO()
+    with _cl.redirect_stdout(_buf):
+        _mg2.print_summary(rep14, False)
+    out14 = _buf.getvalue()
+    ok(out14.find("Alpha -> a.jar") < out14.find("Zebra -> z.jar")
+       < out14.find("中文字 -> c.jar"),
+       "摘要成功下载按名称首字母排序（英文在前中文在后）")
+    ok(out14.find("依赖 A -> a") < out14.find("依赖 Z -> z"), "摘要依赖按首字母排序")
+    ok(out14.find("  - a.jar") < out14.find("  - b.jar"), "摘要手动清单按名称排序")
+
+    print("== 15. CurseForge 兜底（modrinth -> curseforge -> mcmod -> github）==")
+    import mc_migrator.curseforge as _cf
+    import mc_migrator.modrinth as _mr4
+    _saved15 = (_cf.cf_search, _cf.cf_files, _cf._cf_download_file,
+                _mr4.resolve_via_mcmod, _mr4.resolve_via_github,
+                _mr4.mr_lookup_sha1, _mr4.mr_search, _cf.cf_post)
+
+    def cf_dl15(cf_file, dest_dir):
+        fn = cf_file["fileName"]
+        p = os.path.join(dest_dir, fn)
+        make_jar(p, {"fabric.mod.json": json.dumps(
+            {"id": "somemod", "name": "SomeMod", "version": "2.0",
+             "depends": {"minecraft": "1.20.1"}})})
+        return p, None
+
+    cf_meta15 = {"id": "somemod", "name": "SomeMod", "version": "1.0"}
+    cf_jar15 = os.path.join(tmp, "cfmatch.jar")
+    make_jar(cf_jar15, {"fabric.mod.json": json.dumps(cf_meta15)})
+
+    def cf_search15(q, mc=None, loader=None, limit=10):
+        return [{"id": 111, "name": "SomeMod", "slug": "somemod"}]
+
+    def cf_files15(mid, mc=None, loader=None, limit=50):
+        return [{"id": 999, "fileName": "somemod-2.0.jar",
+                 "downloadUrl": "https://x/y.jar", "releaseType": 1,
+                 "fileDate": "2026-01-01T00:00:00Z", "gameVersions": ["1.20.1"]}]
+
+    try:
+        _cf.cf_search = cf_search15
+        _cf.cf_files = cf_files15
+        _cf._cf_download_file = cf_dl15
+        _mr4.resolve_via_mcmod = lambda meta: None
+        _mr4.resolve_via_github = lambda *a, **k: None
+        _mr4.mr_lookup_sha1 = lambda s: None
+        _mr4.mr_search = lambda *a, **k: []
+        pid, conf, why, mf = _mr4.match_to_project(cf_meta15, "1.20.1", "fabric",
+                                                   cf_jar15, compare_dir=cdir)
+        ok(pid == "cf:111" and conf == 1.0 and mf
+           and os.path.basename(mf) == "somemod-2.0.jar" and "CurseForge" in why,
+           "Modrinth 无结果 → CurseForge 兜底命中: %s" % why)
+
+        _cf.cf_search = lambda *a, **k: []
+        _mr4.resolve_via_mcmod = lambda meta: ("P9", "somemod-slug")
+        pid, conf, why, mf = _mr4.match_to_project(cf_meta15, "1.20.1", "fabric",
+                                                   cf_jar15, compare_dir=cdir)
+        ok(pid == "P9" and "mcmod.cn" in why,
+           "CurseForge 无结果 → mcmod.cn 兜底: %s" % why)
+
+        _mr4.resolve_via_mcmod = lambda meta: None
+        _mr4.resolve_via_github = lambda meta, mc, pid, cdir: (
+            "ghowner/ghrepo", "gh.jar", "从 GitHub release 兜底下载", os.path.join(cdir, "gh.jar"))
+        pid, conf, why, mf = _mr4.match_to_project(cf_meta15, "1.20.1", "fabric",
+                                                   cf_jar15, compare_dir=cdir)
+        ok(pid == "github:ghowner/ghrepo" and "GitHub" in why,
+           "mcmod 无结果 → GitHub 兜底: %s" % why)
+
+        _mr4.resolve_via_github = lambda *a, **k: None
+        pid, conf, why, mf = _mr4.match_to_project(cf_meta15, "1.20.1", "fabric",
+                                                   cf_jar15, compare_dir=cdir)
+        ok(pid is None and why == "无搜索结果",
+           "全部来源无结果 → 手动清单: %s" % why)
+
+        ok(_cf._cf_score({"id": "somemod", "name": "SomeMod"},
+                         {"slug": "somemod", "name": "Other"}) == 1.0,
+           "cf 评分：slug 精确匹配 1.0")
+        ok(_cf._cf_score({"id": "somemod-x", "name": "SomeMod"},
+                         {"slug": "other", "name": "SomeMod"}) == 0.95,
+           "cf 评分：名称精确匹配 0.95")
+        f1 = {"fileName": "a.jar", "releaseType": 2, "fileDate": "2026-02-01",
+              "gameVersions": ["1.20.1"]}
+        f2 = {"fileName": "b.jar", "releaseType": 1, "fileDate": "2026-01-01",
+              "gameVersions": ["1.20.1"]}
+        f3 = {"fileName": "c.jar", "releaseType": 1, "fileDate": "2026-03-01",
+              "gameVersions": ["1.21"]}
+        ok(_cf._pick_cf_file([f1, f2, f3], "1.20.1")["fileName"] == "b.jar",
+           "cf 选文件：Release 优先且版本适配（b 而非更新的 c）")
+        ok(_cf._pick_cf_file([f3], "1.20.1") is None, "cf 选文件：无适配版本不选")
+
+        raw1 = os.path.join(tmp, "fp1.bin")
+        raw2 = os.path.join(tmp, "fp2.bin")
+        raw3 = os.path.join(tmp, "fp3.bin")
+        open(raw1, "wb").write(b"ab cd\tef\n")
+        open(raw2, "wb").write(b"abcdef")
+        open(raw3, "wb").write(b"abcdefg")
+        ok(_cf.cf_fingerprint(raw1) == _cf.cf_fingerprint(raw2)
+           and _cf.cf_fingerprint(raw2) != _cf.cf_fingerprint(raw3),
+           "cf 指纹跳过空白字符且内容敏感")
+        ok(_cf._murmur2_32(b"abc", 1) == _cf._murmur2_32(b"abc", 1)
+           and _cf._murmur2_32(b"abc", 1) != _cf._murmur2_32(b"abd", 1),
+           "MurmurHash2 确定性")
+
+        _cf.cf_search = lambda *a, **k: []
+        _cf.cf_post = lambda path, payload: {"data": {"exactMatches": [
+            {"file": {"id": 888, "modId": 777}}]}}
+        _cf.cf_files = cf_files15
+        _cf._cf_download_file = cf_dl15
+        pid, conf, why, mf = _mr4.match_to_project(cf_meta15, "1.20.1", "fabric",
+                                                   cf_jar15, compare_dir=cdir)
+        ok(pid == "cf:777" and "指纹" in why,
+           "本地文件指纹精确匹配 CurseForge: %s" % why)
+
+        import mc_migrator.modrinth as _mr5
+        _urls15 = []
+
+        def dl_capture15(file_info, dest_dir):
+            _urls15.append(file_info["files"][0]["url"])
+            p = os.path.join(dest_dir, "e.jar")
+            make_jar(p, {"fabric.mod.json": json.dumps(
+                {"id": "somemod", "name": "SomeMod", "version": "2.0",
+                 "depends": {"minecraft": "1.20.1"}})})
+            return p, None
+
+        _saved_dl15 = _mr5.mr_download_file
+        _mr5.mr_download_file = dl_capture15
+        _saved_cfdl15 = _cf._cf_download_file
+        _cf._cf_download_file = _saved15[2]
+        _cf._cf_download_file({"id": 3926812, "fileName": "mod.jar",
+                               "releaseType": 1, "fileDate": "2026-01-01T00:00:00Z",
+                               "gameVersions": ["1.20.1"]}, cdir)
+        _cf._cf_download_file = _saved_cfdl15
+        _mr5.mr_download_file = _saved_dl15
+        ok(_urls15 and _urls15[0] == "https://edge.forgecdn.net/files/3926/812/mod.jar",
+           "无 downloadUrl 时构造 edge.forgecdn.net 直链: %s" % _urls15)
+    finally:
+        (_cf.cf_search, _cf.cf_files, _cf._cf_download_file,
+         _mr4.resolve_via_mcmod, _mr4.resolve_via_github,
+         _mr4.mr_lookup_sha1, _mr4.mr_search, _cf.cf_post) = _saved15
+
     print("\n全部通过: %d 项断言" % PASS)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)

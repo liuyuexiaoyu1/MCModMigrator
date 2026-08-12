@@ -33,7 +33,7 @@ class RunConfig:
     def __init__(self, auto_yes=False, skip_deps=False, choices=None,
                  use_system_proxy=True, download_threads=4, analysis_threads=4,
                  print_failures=True, ignore_fork=False, migrate_mods=True,
-                 log=None, confirm=None):
+                 curseforge_key=None, log=None, confirm=None):
         self.auto_yes = auto_yes
         self.skip_deps = skip_deps
         self.use_system_proxy = use_system_proxy
@@ -42,6 +42,7 @@ class RunConfig:
         self.print_failures = print_failures
         self.ignore_fork = ignore_fork
         self.migrate_mods = migrate_mods
+        self.curseforge_key = curseforge_key
         self.on_conflicts = None
         self.pending_big = []
         self.migrated_dirs = []
@@ -64,6 +65,8 @@ def _match_one(i, jname, meta, jpath, mc_version, src_mc_version, loader, cfg, s
     if reason and "已按选项忽略" in reason:
         cfg.log.warn(reason)
     if reason and "mcmod.cn" in reason:
+        cfg.log.info(reason)
+    if reason and "CurseForge" in reason:
         cfg.log.info(reason)
     if isinstance(project_id, str) and project_id.startswith("github:"):
         cfg.log.info(reason)
@@ -693,6 +696,9 @@ def run_migration(params, cfg):
 
     PROXY_SETTINGS["use_system"] = cfg.use_system_proxy
     configure_http(cfg.log)
+    from .curseforge import configure_cf, set_api_key
+    configure_cf(cfg.log)
+    set_api_key(cfg.curseforge_key)
 
     if src_version:
         src_client, src_isolated = client_paths(
@@ -817,24 +823,27 @@ def print_summary(report, same_client):
     print("迁移完成，摘要：")
     if report.get("checked"):
         print("已检查现有模组 %d 个：" % len(report["checked"]))
-        for name, jname in report["checked"]:
+        for name, jname in sorted(report["checked"], key=lambda x: str(x[0]).lower()):
             print("  %s（%s）" % (name, jname))
     print("成功下载 %d 个模组：" % len(report["ok"]))
-    for name, fname in report["ok"]:
+    for name, fname in sorted(report["ok"], key=lambda x: str(x[0]).lower()):
         print("  %s -> %s" % (name, fname))
     if report["skipped"]:
         print("跳过 %d 个（库文件/非模组）：" % len(report["skipped"]))
-        for j in report["skipped"]:
+        for j in sorted(report["skipped"]):
             print("  %s" % j)
     if report.get("duplicates"):
         print("重复项目合并 %d 个（同一项目只下载一次）：" % len(report["duplicates"]))
     if report["deps"]:
         print("依赖：")
-        for d in report["deps"]:
+        for d in sorted(report["deps"]):
             print("  %s" % d)
     if report["manual"]:
         print("%d 个模组需要手动处理：" % len(report["manual"]))
-        for jname, meta, why in report["manual"]:
+        for jname, meta, why in sorted(report["manual"],
+                                       key=lambda x: str((x[1] or {}).get("name")
+                                                         or (x[1] or {}).get("id")
+                                                         or x[0]).lower()):
             q = meta.get("name") or meta.get("id") or jname
             print("  - %s（%s）" % (jname, why))
             print("    搜索: https://modrinth.com/discover/mods?q=%s" % quote(q))
@@ -850,14 +859,22 @@ def write_report_file(report, src_desc, dst_desc):
     def esc(s):
         return _html.escape(str(s))
 
+    def _mkey(x):
+        jname, meta, _why = x
+        return str((meta or {}).get("name") or (meta or {}).get("id") or jname).lower()
+
     ok_html = "".join(
         '<div class="ok-item"><span class="ok-name">%s</span><span class="ok-file">%s</span></div>'
-        % (esc(n), esc(f)) for n, f in report["ok"])
+        % (esc(n), esc(f))
+        for n, f in sorted(report["ok"], key=lambda x: str(x[0]).lower()))
     checked_html = "".join(
         '<div class="ok-item"><span class="ok-name">%s</span><span class="ok-file">%s</span></div>'
-        % (esc(n), esc(j)) for n, j in report.get("checked", []))
-    skip_html = "".join('<div class="skip-item">%s</div>' % esc(j) for j in report["skipped"])
-    dep_html = "".join('<div class="dep-item">%s</div>' % esc(d) for d in report["deps"])
+        % (esc(n), esc(j))
+        for n, j in sorted(report.get("checked", []), key=lambda x: str(x[0]).lower()))
+    skip_html = "".join('<div class="skip-item">%s</div>' % esc(j)
+                        for j in sorted(report["skipped"]))
+    dep_html = "".join('<div class="dep-item">%s</div>' % esc(d)
+                       for d in sorted(report["deps"]))
     manual_html = "".join(
         '<div class="manual-item"><span class="manual-name">%s</span>'
         '<span class="manual-file">%s</span>'
@@ -866,7 +883,7 @@ def write_report_file(report, src_desc, dst_desc):
         % (esc((meta or {}).get("name") or (meta or {}).get("id") or jname),
            esc(jname), esc(why),
            quote((meta or {}).get("name") or (meta or {}).get("id") or jname))
-        for jname, meta, why in report["manual"])
+        for jname, meta, why in sorted(report["manual"], key=_mkey))
 
     def card(title, color, body):
         if not body:

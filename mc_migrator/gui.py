@@ -247,6 +247,11 @@ class MainWindow(QtWidgets.QWidget):
         ck.addWidget(self.failures_chk)
         ck.addWidget(self.data_checks["server"])
         ck.addStretch(1)
+        self.cf_key_edit = QtWidgets.QLineEdit()
+        self.cf_key_edit.setPlaceholderText("留空使用环境变量 CURSEFORGE_API_KEY")
+        self.cf_key_edit.setToolTip("CurseForge API Key（console.curseforge.com 申请）")
+        opt.addWidget(QtWidgets.QLabel("CurseForge Key"), 3, 2)
+        opt.addWidget(self.cf_key_edit, 3, 3, 1, 3)
         opt.addWidget(self.threads_box, 0, 3)
         opt.addWidget(self.analysis_box, 1, 3)
         opt.addWidget(self.ck_row, 2, 2, 1, 4)
@@ -550,6 +555,7 @@ class MainWindow(QtWidgets.QWidget):
             analysis_threads=self.analysis_spin.value(),
             print_failures=self.failures_chk.isChecked(),
             ignore_fork=self.ignore_fork_chk.isChecked(),
+            curseforge_key=self.cf_key_edit.text().strip() or None,
         )
         self.stop_event = threading.Event()
         params = {"src_root": mc_root, "src_version": src_version,
