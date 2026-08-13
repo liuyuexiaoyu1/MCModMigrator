@@ -1028,7 +1028,7 @@ try:
     rep14 = {"ok": [("Zebra", "z.jar"), ("Alpha", "a.jar"), ("中文字", "c.jar")],
              "manual": [("b.jar", {"name": "Beta"}, "原因"), ("a.jar", {"name": "Apple"}, "原因")],
              "deps": ["依赖 Z -> z", "依赖 A -> a"],
-             "skipped": ["z2.jar", "a2.jar"],
+             "skipped": [("z2.jar", "无法解析"), ("a2.jar", "无法解析")],
              "checked": [("Zeta", "z3.jar"), ("Alpha2", "a3.jar")],
              "migrated_dirs": [], "log": [], "elapsed": 1.0}
     _buf = _io.StringIO()
@@ -1145,7 +1145,7 @@ try:
         import mc_migrator.modrinth as _mr5
         _urls15 = []
 
-        def dl_capture15(file_info, dest_dir):
+        def dl_capture15(file_info, dest_dir, ua=None):
             _urls15.append(file_info["files"][0]["url"])
             p = os.path.join(dest_dir, "e.jar")
             make_jar(p, {"fabric.mod.json": json.dumps(
@@ -1160,10 +1160,14 @@ try:
         _cf._cf_download_file({"id": 3926812, "fileName": "mod.jar",
                                "releaseType": 1, "fileDate": "2026-01-01T00:00:00Z",
                                "gameVersions": ["1.20.1"]}, cdir)
+        _cf._cf_download_file({"id": 3926813, "fileName": "my mod.jar",
+                               "releaseType": 1, "fileDate": "2026-01-01T00:00:00Z",
+                               "gameVersions": ["1.20.1"]}, cdir)
         _cf._cf_download_file = _saved_cfdl15
         _mr5.mr_download_file = _saved_dl15
-        ok(_urls15 and _urls15[0] == "https://edge.forgecdn.net/files/3926/812/mod.jar",
-           "无 downloadUrl 时构造 edge.forgecdn.net 直链: %s" % _urls15)
+        ok(_urls15 and _urls15[0] == "https://edge.forgecdn.net/files/3926/812/mod.jar"
+           and _urls15[1] == "https://edge.forgecdn.net/files/3926/813/my%20mod.jar",
+           "无 downloadUrl 时构造 edge 直链并对文件名 URL 编码: %s" % _urls15)
     finally:
         (_cf.cf_search, _cf.cf_files, _cf._cf_download_file,
          _mr4.resolve_via_mcmod, _mr4.resolve_via_github,

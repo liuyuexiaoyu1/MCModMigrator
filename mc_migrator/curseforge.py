@@ -12,25 +12,20 @@ CF_API = "https://api.curseforge.com/v1"
 CF_GAME_ID = 432
 CF_MOD_CLASS = 6
 CF_LOADER_IDS = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}
+CF_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                 "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
 
 _SESSION = requests.Session()
 _logger = None
 
 
+CF_API_KEY = os.environ.get("CURSEFORGE_API_KEY") or \
+    "$2a$10$TK3CR9laZ1oUb51B1rXZJ.UQ.bLHZGEZ8Y86nbMacMf1rorvdkBWG"
+
+
 def configure_cf(log=None):
     global _logger
     _logger = log
-
-
-def set_api_key(key):
-    global CF_API_KEY
-    key = (key or "").strip()
-    if key:
-        CF_API_KEY = key
-
-
-CF_API_KEY = os.environ.get("CURSEFORGE_API_KEY") or \
-    "$2a$10$vzUi1yyCf8oQ6fWeoAqv8.Osj5elqAUSUewRzGmVuGjEE/sjzKZke"
 
 
 def cf_get(path, params=None):
@@ -85,7 +80,8 @@ def cf_post(path, payload):
 
 def cf_search(query, mc_version=None, loader=None, limit=10):
     params = {"gameId": CF_GAME_ID, "classId": CF_MOD_CLASS,
-              "searchFilter": query, "pageSize": min(limit, 50), "sortField": 6}
+              "searchFilter": query, "pageSize": min(limit, 50),
+              "sortField": 6, "sortOrder": "desc"}
     if mc_version:
         params["gameVersion"] = mc_version
     if loader and loader in CF_LOADER_IDS:
@@ -110,13 +106,15 @@ def cf_project(mod_id):
 
 
 def _cf_download_file(cf_file, dest_dir):
+    from urllib.parse import quote
     from .modrinth import mr_download_file
+    fname = cf_file.get("fileName") or "mod.jar"
     fid = int(cf_file.get("id") or 0)
     url = cf_file.get("downloadUrl") or ("https://edge.forgecdn.net/files/%d/%d/%s"
                                          % (fid // 1000, fid % 1000,
-                                            cf_file.get("fileName") or ""))
-    return mr_download_file({"files": [{"filename": cf_file.get("fileName") or "mod.jar",
-                                        "url": url}]}, dest_dir)
+                                            quote(fname, safe="")))
+    return mr_download_file({"files": [{"filename": fname, "url": url}]}, dest_dir,
+                            ua=CF_BROWSER_UA)
 
 
 def _murmur2_32(data, seed=1):

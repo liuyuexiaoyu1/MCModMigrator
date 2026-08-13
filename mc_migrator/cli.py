@@ -250,7 +250,6 @@ def run_cli(args):
                     analysis_threads=args.analysis_threads,
                     print_failures=not args.no_failures,
                     ignore_fork=args.ignore_fork,
-                    curseforge_key=getattr(args, "curseforge_key", None),
                     log=log, confirm=confirm)
     cfg.on_conflicts = on_conflicts
     params = {"src_root": mc_root, "src_version": src_version,

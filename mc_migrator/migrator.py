@@ -33,7 +33,7 @@ class RunConfig:
     def __init__(self, auto_yes=False, skip_deps=False, choices=None,
                  use_system_proxy=True, download_threads=4, analysis_threads=4,
                  print_failures=True, ignore_fork=False, migrate_mods=True,
-                 curseforge_key=None, log=None, confirm=None):
+                 log=None, confirm=None):
         self.auto_yes = auto_yes
         self.skip_deps = skip_deps
         self.use_system_proxy = use_system_proxy
@@ -42,7 +42,6 @@ class RunConfig:
         self.print_failures = print_failures
         self.ignore_fork = ignore_fork
         self.migrate_mods = migrate_mods
-        self.curseforge_key = curseforge_key
         self.on_conflicts = None
         self.pending_big = []
         self.migrated_dirs = []
@@ -55,9 +54,9 @@ def _match_one(i, jname, meta, jpath, mc_version, src_mc_version, loader, cfg, s
     if stop_event is not None and stop_event.is_set():
         return ("stopped",)
     if not meta:
-        return ("skip", "无法解析该 jar（可能不是模组或文件损坏），跳过")
+        return ("skip", jname, "无法解析该 jar（可能不是模组或文件损坏），跳过")
     if meta.get("library"):
-        return ("skip", "%s 是库文件（library=true），跳过" % meta.get("id"))
+        return ("skip", jname, "%s 是库文件（library=true），跳过" % meta.get("id"))
     cfg.log.info("正在查询 Modrinth 匹配 %s ..." % (meta.get("name") or meta.get("id")))
     project_id, confidence, reason, matched_file = match_to_project(
         meta, mc_version, loader, jpath, ignore_fork=cfg.ignore_fork,
@@ -140,8 +139,12 @@ def migrate_mods(src_mods_dir, target_mods_dir, mc_version, loader, cfg, report,
             continue
         kind = out[0]
         if kind == "skip":
-            report["skipped"].append(out[1])
-            cfg.log.warn(out[1])
+            jname, reason = out[1], out[2]
+            if "无法解析" in reason:
+                report["skipped"].append((jname, reason))
+                cfg.log.warn("%s（%s）" % (jname, reason))
+            else:
+                cfg.log.info("%s（%s）" % (jname, reason))
             continue
         if kind == "manual":
             jname, meta, reason = out[1], out[2], out[3]
@@ -265,11 +268,10 @@ def repair_mods_same_dir(mods_dir, mc_version, loader, cfg, report, graph):
                 ids[i] = None
     for jname, meta, pid in zip(jars, metas, ids):
         if meta is None:
-            report["skipped"].append(jname)
-            cfg.log.warn("%s 无法解析（可能不是模组或文件损坏），跳过" % jname)
+            report["skipped"].append((jname, "无法解析该 jar（可能不是模组或文件损坏），跳过"))
+            cfg.log.warn("%s（无法解析该 jar（可能不是模组或文件损坏），跳过）" % jname)
             continue
         if meta.get("library"):
-            report["skipped"].append(jname)
             cfg.log.info("%s 是库文件（library=true），跳过" % jname)
             continue
         graph.add_mod(meta.get("id") or jname, meta.get("name") or jname,
@@ -696,9 +698,8 @@ def run_migration(params, cfg):
 
     PROXY_SETTINGS["use_system"] = cfg.use_system_proxy
     configure_http(cfg.log)
-    from .curseforge import configure_cf, set_api_key
+    from .curseforge import configure_cf
     configure_cf(cfg.log)
-    set_api_key(cfg.curseforge_key)
 
     if src_version:
         src_client, src_isolated = client_paths(
@@ -829,9 +830,9 @@ def print_summary(report, same_client):
     for name, fname in sorted(report["ok"], key=lambda x: str(x[0]).lower()):
         print("  %s -> %s" % (name, fname))
     if report["skipped"]:
-        print("跳过 %d 个（库文件/非模组）：" % len(report["skipped"]))
-        for j in sorted(report["skipped"]):
-            print("  %s" % j)
+        print("跳过 %d 个（无法解析）：" % len(report["skipped"]))
+        for j, r in sorted(report["skipped"]):
+            print("  - %s（%s）" % (j, r))
     if report.get("duplicates"):
         print("重复项目合并 %d 个（同一项目只下载一次）：" % len(report["duplicates"]))
     if report["deps"]:
@@ -871,8 +872,10 @@ def write_report_file(report, src_desc, dst_desc):
         '<div class="ok-item"><span class="ok-name">%s</span><span class="ok-file">%s</span></div>'
         % (esc(n), esc(j))
         for n, j in sorted(report.get("checked", []), key=lambda x: str(x[0]).lower()))
-    skip_html = "".join('<div class="skip-item">%s</div>' % esc(j)
-                        for j in sorted(report["skipped"]))
+    skip_html = "".join(
+        '<div class="manual-item"><span class="manual-name">%s</span>'
+        '<span class="manual-reason">%s</span></div>'
+        % (esc(j), esc(r)) for j, r in sorted(report["skipped"]))
     dep_html = "".join('<div class="dep-item">%s</div>' % esc(d)
                        for d in sorted(report["deps"]))
     manual_html = "".join(

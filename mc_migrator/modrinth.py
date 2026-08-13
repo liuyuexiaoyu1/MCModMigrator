@@ -110,7 +110,7 @@ def primary_filename(file_info):
     return f.get("filename") or os.path.basename(f.get("url") or "mod.jar")
 
 
-def mr_download_file(file_info, dest_dir):
+def mr_download_file(file_info, dest_dir, ua=None):
     files = file_info.get("files") or []
     if not files:
         return None, "该版本没有可下载文件"
@@ -123,7 +123,7 @@ def mr_download_file(file_info, dest_dir):
     dest = os.path.join(dest_dir, fname)
     for attempt in range(4):
         try:
-            r = _SESSION.get(url, stream=True, headers={"User-Agent": USER_AGENT},
+            r = _SESSION.get(url, stream=True, headers={"User-Agent": ua or USER_AGENT},
                              timeout=(10, 30), proxies=effective_proxies())
             if r.status_code == 429:
                 _throttle_wait(r)
